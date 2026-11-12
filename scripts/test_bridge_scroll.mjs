@@ -1,0 +1,21 @@
+import assert from 'node:assert/strict';
+import {advanceDom,selectResults} from './xhs_bridge_driver.mjs';
+globalThis.GUARD=()=>({});
+globalThis.getComputedStyle=e=>({overflowY:e.overflow});
+function el(h,ch,overflow,parent=null){return {scrollHeight:h,clientHeight:ch,overflow,parentElement:parent,scrollTop:0,querySelectorAll(){return []},getClientRects(){return ch>0?[{}]:[]},scrollBy({top}){this.scrollTop=Math.min(h-ch,this.scrollTop+top)},scrollTo({top}){this.scrollTop=Math.min(h-ch,top)}}}
+const actual=el(699,281,'scroll');
+const layout=el(627,209,'visible',actual);
+const fake=el(425,0,'visible');
+let roots=[fake,layout];
+globalThis.document={querySelectorAll:s=>s==='.feeds-container,.search-result-container'?roots:[],scrollingElement:el(668,668,'visible')};
+assert.equal(advanceDom({stage:'search'}).after,418);assert.equal(fake.scrollTop,0);assert.equal(layout.scrollTop,0);
+assert.equal(advanceDom({stage:'search',resumeTop:100}).after,100);
+const hidden=el(900,100,'hidden',actual);roots=[hidden];
+assert.equal(advanceDom({stage:'search',resumeTop:120}).after,120);assert.equal(hidden.scrollTop,0);
+const regular=el(1000,500,'auto');roots=[regular];
+assert.equal(advanceDom({stage:'author'}).after,500);
+roots=[fake];assert.equal(selectResults(),null);assert.equal(advanceDom({stage:'search'}).error,'CONTENT_LOADING');
+roots=[];assert.equal(advanceDom({stage:'search'}).error,'CONTENT_LOADING');
+roots=[regular];globalThis.GUARD=()=>({error:'ACCOUNT_MISMATCH'});const before=regular.scrollTop;
+assert.equal(advanceDom({stage:'search'}).error,'ACCOUNT_MISMATCH');assert.equal(regular.scrollTop,before);
+console.log('PASS visible result roots, loading guard, real scroll container, resume position and account guard');

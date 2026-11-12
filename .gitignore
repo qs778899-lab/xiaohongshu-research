@@ -1,0 +1,33 @@
+# Private configuration; never force-add this directory.
+.local/
+.env
+.env.*
+!.env.example
+.DS_Store
+__pycache__/
+*.py[cod]
+.pytest_cache/
+.venv/
+node_modules/
+# Collection artifacts belong outside this repository.
+*.sqlite*
+*.db
+*.log
+*.har
+*.png
+*.jpg
+*.jpeg
+*.webp
+*.mp4
+*.wav
+*.mp3
+*.zip
+*.tar*
+raw/
+runs/
+projects/
+reports/
+runtime/
+cache/
+* 2.py
+* 2.mjs

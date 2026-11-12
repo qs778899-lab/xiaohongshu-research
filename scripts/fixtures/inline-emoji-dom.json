@@ -1,0 +1,36 @@
+[
+  {
+    "fixture": "Synthetic inline emoji DOM; no account or study identities",
+    "note_id": "111111111111111111111111",
+    "cid": "333333333333333333333333",
+    "rootId": "555555555555555555555555",
+    "authorId": "cccccccccccccccccccccccc",
+    "wrapper": true,
+    "target": "Synthetic reply target",
+    "labels": [
+      {
+        "src": "https://picasso-static.xiaohongshu.com/fe-platform/1b81c5ec3f7006f6b8baf7c006773f5f9d1ab6d7.png"
+      }
+    ]
+  },
+  {
+    "fixture": "Synthetic inline emoji DOM; no account or study identities",
+    "note_id": "222222222222222222222222",
+    "cid": "444444444444444444444444",
+    "rootId": "666666666666666666666666",
+    "authorId": "cccccccccccccccccccccccc",
+    "wrapper": false,
+    "target": "",
+    "labels": [
+      {
+        "src": "https://picasso-static.xiaohongshu.com/fe-platform/ca75b2fc85b0a3e171fe5df1cbf90efdcd3ba571.png"
+      },
+      {
+        "src": "https://picasso-static.xiaohongshu.com/fe-platform/ca75b2fc85b0a3e171fe5df1cbf90efdcd3ba571.png"
+      },
+      {
+        "src": "https://picasso-static.xiaohongshu.com/fe-platform/ca75b2fc85b0a3e171fe5df1cbf90efdcd3ba571.png"
+      }
+    ]
+  }
+]
