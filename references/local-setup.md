@@ -33,6 +33,8 @@ python3 scripts/xhs_local.py resolve --project /external/research/topic-a
 
 ## 日常维护和发布
 
+每次调用及维护修改遵循 [AGENTS.md](../AGENTS.md) 和[阶段提交与同步](maintenance.md)。既有用户允许自动同步时，每个已验证阶段都及时提交、推送；授权记录与同步断点分别留在 `.local/maintenance-policy.json`、`.local/maintenance-status.json`，不进入公开仓库。
+
 公共修复在本仓库直接开发。新增公共文件先更新 `PUBLIC_FILES.txt`，用合成测试验证。测试输出放临时目录。每个克隆需执行一次 `git config --local core.hooksPath .githooks`；仅影响当前仓库。受管理执行环境如果限制 Git 写入，按环境审批处理。
 
 私有 `.local/publication-policy.json` 可设置 `{"forbidden_strings": ["需要拦截的个人标签"]}`。本机检查会检查公开文件、暂存区或全历史，但不输出命中的值；CI 没有你的私有禁词，因此发布者仍须本地检查。不要把实际禁词复制进公共测试。hooks 是防误操作措施，不能阻止故意使用 `--no-verify`；不要绕过它们。

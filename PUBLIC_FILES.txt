@@ -1,6 +1,7 @@
 .githooks/pre-commit
 .githooks/pre-push
 .gitignore
+AGENTS.md
 LICENSE
 NOTICE
 PUBLIC_FILES.txt
@@ -18,6 +19,7 @@ references/continuous-run.md
 references/current-page-recovery.md
 references/current-search-recovery.md
 references/local-setup.md
+references/maintenance.md
 references/manual-tab-recovery.md
 references/media-review-scope.md
 references/media.md

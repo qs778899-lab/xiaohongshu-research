@@ -42,6 +42,8 @@ npm install --prefix "$XHS_RUNTIME/opencli" --ignore-scripts '@jackwener/opencli
 
 ## 验证与发布
 
+在调用过程中完善 skill 时，遵循 [AGENTS.md](AGENTS.md) 和[阶段提交与同步](references/maintenance.md)：阶段验证通过后详细 commit，并在既有授权范围内及时 push。私有研究数据不参与提交。
+
 ```sh
 "$XHS_RUNTIME/python/bin/python" scripts/run_tests.py \
   --opencli-root "$XHS_RUNTIME/opencli/node_modules/@jackwener/opencli"
