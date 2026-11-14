@@ -15,6 +15,8 @@ class ManualTabTests(unittest.TestCase):
         self.tmp=tempfile.TemporaryDirectory()
         self.addCleanup(self.tmp.cleanup)
         self.p=Path(self.tmp.name).resolve()
+        guard=patch.object(xp.legacy,'account_root',return_value=self.p/'account-guard')
+        guard.start();self.addCleanup(guard.stop)
         self.url='https://www.xiaohongshu.com/search_result/?keyword=test&type=51'
         self.uid='1'*24
         self.parent={'format':'xhs-bridge-v1','project':str(self.p),'profile_label':'test',
@@ -58,8 +60,74 @@ class ManualTabTests(unittest.TestCase):
              patch.object(m.nr,'locked_stops',lock),patch.object(m.nr,'current_stops',return_value=self.stops):
             yield
 
-    def run_inspect(self):
-        with self.mocks():return m.inspect(self.p,'old',self.meta,self.user)
+    def run_inspect(self,destination=None):
+        with self.mocks():return m.inspect(destination or self.p,'old',self.meta,self.user,
+                                         parent_project=self.p if destination else None)
+
+    def test_cross_project_inherits_prior_exclusions_in_new_grant(self):
+        self.parent['manual_excluded_note_ids']=['7'*24]
+        destination=self.p/'separate-project'
+        probe,review=self.complete_probe_fixture(destination)
+        with self.mocks():result=m.attest(probe,review,'manual-destination')
+        self.assertEqual(result['excluded_note_ids'],['2'*24,'7'*24])
+
+    def test_inherited_excluded_card_is_not_navigated(self):
+        self.parent['manual_excluded_note_ids']=['3'*24]
+        inspected=self.run_inspect(self.p/'separate-project')['inspection']
+        before=list(self.calls)
+        with self.assertRaisesRegex(bridge.BridgeError,'ORIGINAL_RESTRICTED_NOTE_EXCLUDED'):
+            m.probe_note(inspected,self.capture['cards'][0]['url'])
+        self.assertEqual(before,self.calls)
+
+    def test_explicit_destination_keeps_capture_out_of_source_project(self):
+        destination=self.p/'separate-project'
+        result=self.run_inspect(destination)
+        self.assertTrue(Path(result['inspection']).is_relative_to(destination))
+        saved=m.check_pointer(m.pointer(result['inspection']))
+        attempt=m.check_pointer(saved['attempt'])
+        self.assertEqual(saved['binding']['project'],str(destination))
+        self.assertEqual(attempt['parent_project'],str(self.p))
+        self.assertFalse((self.p/'bridge').exists())
+        self.assertFalse(result['collection_permitted'])
+
+    def test_switching_destination_cannot_retry_consumed_probe(self):
+        self.error='ACCESS_STOP'
+        with self.assertRaises(bridge.BridgeError):self.run_inspect(self.p/'first')
+        calls=list(self.calls)
+        with self.assertRaisesRegex(bridge.BridgeError,'MANUAL_INSPECT_ALREADY_ATTEMPTED'):
+            self.run_inspect(self.p/'second')
+        self.assertEqual(calls,self.calls)
+
+    def test_destination_grant_preserves_account_stop_and_own_authority(self):
+        destination=self.p/'separate-project'
+        probe,review=self.complete_probe_fixture(destination)
+        before=self.stop.read_bytes()
+        with self.mocks():result=m.attest(probe,review,'manual-destination')
+        b=bridge.load_binding(destination,'manual-destination')
+        self.assertEqual(before,self.stop.read_bytes())
+        with patch.object(m.nr,'current_stops',return_value=self.stops):
+            self.assertEqual(m.web_exceptions(destination,b,['k']),{'k':self.stops['k']['sha256']})
+            with self.assertRaisesRegex(bridge.BridgeError,'MANUAL_PROJECT_CHANGED'):
+                m.web_exceptions(self.p,b,['k'])
+        self.assertFalse((self.p/'bridge/bindings/manual-destination.json').exists())
+
+    def test_cross_project_active_entrypoint_only_records_destination(self):
+        destination=self.p/'separate-project'
+        with self.mocks():result=m.inspect_active(destination,'old',self.user,parent_project=self.p)
+        self.assertTrue(Path(result['inspection']).is_relative_to(destination))
+        self.assertEqual(len(list((destination/'bridge/manual-active-observations').glob('*.json'))),1)
+        self.assertFalse((self.p/'bridge').exists())
+
+    def test_cross_project_account_mismatch_never_reads_content(self):
+        self.identity_uid='4'*24
+        with self.assertRaisesRegex(bridge.BridgeError,'MANUAL_IDENTITY_CHANGED'):
+            self.run_inspect(self.p/'separate-project')
+        self.assertNotIn('capture',self.calls)
+
+    def test_repository_destination_is_rejected_before_browser_calls(self):
+        with self.assertRaises(xp.legacy.ResearchError):
+            self.run_inspect(Path(m.__file__).resolve().parents[1])
+        self.assertEqual(self.calls,[])
 
     def test_homepage_cannot_validate_research_access(self):
         self.put('meta.json',{'tabId':11,'windowId':22,'url':'https://www.xiaohongshu.com/explore','active':True})
@@ -138,8 +206,8 @@ class ManualTabTests(unittest.TestCase):
         self.assertEqual(m.proof_args(a),m.proof_args(b))
         self.assertNotEqual(m.proof_args(a),m.proof_args(b.replace('3'*24,'4'*24)))
 
-    def complete_probe_fixture(self):
-        inspected_path=Path(self.run_inspect()['inspection'])
+    def complete_probe_fixture(self,destination=None):
+        inspected_path=Path(self.run_inspect(destination)['inspection'])
         root=inspected_path.parent;inspected=json.loads(inspected_path.read_text())
         note={'uid':self.uid,'url':'https://www.xiaohongshu.com/explore/'+'3'*24,
               'title':'Treatment diary','body':'Personal treatment narrative.',

@@ -37,6 +37,14 @@ def note_id(url):
     m=re.fullmatch(r'/(?:explore|search_result)/([a-f0-9]{24})/?',urlparse(url).path)
     return m[1] if m else None
 
+def excluded_notes(parent):
+    inherited=parent.get('manual_excluded_note_ids',[])
+    nr.require(isinstance(inherited,list) and all(isinstance(x,str) and re.fullmatch(r'[a-f0-9]{24}',x)
+               for x in inherited),'MANUAL_EXCLUSIONS_INVALID')
+    original=parent.get('tabs',{}).get('detail',{}).get('navigation_intent',{}).get('url')
+    current=note_id(original) if original else None
+    return sorted(set(inherited+([current] if current else [])))
+
 def active_metadata(value):
     meta=value.get('metadata',value)
     rows=meta.get('tabs',[meta])
@@ -70,11 +78,14 @@ def require_capture(data,b,args):
         nr.require(bool(data.get('title','').strip()) and bool(data.get('body','').strip()),'MANUAL_NOTE_CONTENT_REQUIRED')
         nr.require(bool(data.get('authors')),'MANUAL_NOTE_AUTHOR_REQUIRED')
 
-def inspect(project,parent_name,metadata_file,user_file):
+def inspect(project,parent_name,metadata_file,user_file,parent_project=None):
     project=Path(project).resolve()
-    parent=bridge.load_binding(project,parent_name)
+    xp.legacy.research_path(project)
+    source_project=Path(parent_project).resolve() if parent_project is not None else project
+    parent=bridge.load_binding(source_project,parent_name)
     metadata,_=nr.read_json(metadata_file)
     target=active_metadata(metadata)
+    nr.require(note_id(target['url']) not in excluded_notes(parent),'ORIGINAL_RESTRICTED_NOTE_EXCLUDED')
     user,_=nr.read_json(user_file)
     nr.require(user.get('user_statement') and user.get('normal_other_posts_statement'),'MANUAL_USER_RESTORATION_REQUIRED')
     when=nr.stamp(user.get('processed_at'))
@@ -86,15 +97,24 @@ def inspect(project,parent_name,metadata_file,user_file):
         root=project/'bridge'/'manual-tab-recoveries'/attempt_id
         root.mkdir(parents=True,exist_ok=True)
         nr.require(not (root/'attempt.json').exists(),'MANUAL_INSPECT_ALREADY_ATTEMPTED')
+        old_attempt=source_project/'bridge'/'manual-tab-recoveries'/attempt_id/'attempt.json'
+        nr.require(not old_attempt.exists(),'MANUAL_INSPECT_ALREADY_ATTEMPTED')
+        reservation=xp.legacy.account_root()/'manual-tab-attempts'/(attempt_id+'.json')
+        nr.require(not reservation.exists(),'MANUAL_INSPECT_ALREADY_ATTEMPTED')
+        reservation_ref=evidence(reservation,{'kind':'manual_tab_attempt_reservation_v1',
+            'project':str(project),'parent_project':str(source_project),'context_id':parent['context_id'],
+            'tab_id':target['tabId'],'stops':stops,'at':xp.legacy.now()})
         slot={'session':'xhs-manual-'+attempt_id[:24],'owned':False,'state':'user_bound',
               'window_id':target['windowId'],'chrome_tab_id':target['tabId'],'last_url':target['url']}
-        b={k:parent[k] for k in ('format','project','profile_label','context_id','account_uid','profile_guard_key','runtime')}
+        b={k:parent[k] for k in ('format','profile_label','context_id','account_uid','profile_guard_key','runtime')}
+        b['project']=str(project)
         b.update(binding_name='manual-'+attempt_id[:24],session=slot['session'],
                  extension_version=bridge.effective_extension_version(parent),
                  authorization=user['user_statement'],transport_surface='browser',manual_single_tab=True,
                  tabs={'search':slot,'detail':slot},state='probe_only',background_text_collection=True)
         frozen_stops={k:evidence(root/('stop-'+k+'.json'),nr.read_json(s['file'],s['sha256'])[0]) for k,s in stops.items()}
-        attempt={'kind':KIND,'at':xp.legacy.now(),'project':str(project),'parent':evidence(root/'parent.json',parent),
+        attempt={'kind':KIND,'at':xp.legacy.now(),'project':str(project),'parent_project':str(source_project),
+                 'parent':evidence(root/'parent.json',parent),'account_attempt':reservation_ref,
                  'metadata':evidence(root/'user-tab-metadata.json',metadata),'user':evidence(root/'user-request.json',user),
                  'target':target,'stops':stops,'frozen_stops':frozen_stops,'candidate':b,'args':args}
         evidence(root/'attempt.json',attempt)
@@ -110,7 +130,7 @@ def inspect(project,parent_name,metadata_file,user_file):
             capture_ref=evidence(root/'loaded-page.json',capture)
             require_capture(capture,b,args)
             nr.require(nr.current_stops(keys)==stops,'MANUAL_STOP_CHANGED')
-            nr.require(bridge.load_binding(project,parent_name)==parent,'MANUAL_PARENT_CHANGED')
+            nr.require(bridge.load_binding(source_project,parent_name)==parent,'MANUAL_PARENT_CHANGED')
             result={'kind':KIND,'at':xp.legacy.now(),'attempt':pointer(root/'attempt.json'),'binding':b,
                     'capture':capture_ref,'collection_permitted':False,'original_binding_unchanged':True}
             evidence(root/'inspection.json',result)
@@ -120,9 +140,11 @@ def inspect(project,parent_name,metadata_file,user_file):
             raise
         finally:driver.close()
 
-def inspect_active(project,parent_name,user_file):
+def inspect_active(project,parent_name,user_file,parent_project=None):
     """Observe only the active XHS tab in the original profile's focused window."""
-    project=Path(project).resolve();parent=bridge.load_binding(project,parent_name)
+    project=Path(project).resolve();xp.legacy.research_path(project)
+    source_project=Path(parent_project).resolve() if parent_project is not None else project
+    parent=bridge.load_binding(source_project,parent_name)
     user,_=nr.read_json(user_file)
     nr.require(user.get('user_statement') and user.get('normal_other_posts_statement'),'MANUAL_USER_RESTORATION_REQUIRED')
     driver=bridge.Driver(parent['runtime'])
@@ -135,7 +157,7 @@ def inspect_active(project,parent_name,user_file):
     folder=project/'bridge/manual-active-observations';folder.mkdir(parents=True,exist_ok=True)
     path=folder/(xp.digest({'metadata':meta,'user':pointer(user_file),'stops':stops})+'.json')
     evidence(path,{'metadata':meta,'observed_at':xp.legacy.now(),'scope':'active_xhs_url_metadata_only'})
-    return inspect(project,parent_name,path,user_file)
+    return inspect(project,parent_name,path,user_file,parent_project=source_project)
 
 def probe_search(inspection_file,task_id):
     inspected,_=nr.read_json(inspection_file)
@@ -192,7 +214,7 @@ def probe_note(inspection_file,url):
     nr.require(url in {c.get('url') for c in loaded.get('cards',[])},'MANUAL_ACTUALLY_OBSERVED_CARD_REQUIRED')
     parent=check_pointer(attempt['parent'])
     original=parent.get('tabs',{}).get('detail',{}).get('navigation_intent',{}).get('url')
-    nr.require(not original or target!=note_id(original),'ORIGINAL_RESTRICTED_NOTE_EXCLUDED')
+    nr.require(target not in excluded_notes(parent),'ORIGINAL_RESTRICTED_NOTE_EXCLUDED')
     with nr.locked_stops(b['profile_guard_key'],b['account_uid']) as keys:
         nr.require(nr.current_stops(keys)==attempt['stops'],'MANUAL_STOP_CHANGED')
         nr.require(not (root/'note-attempt.json').exists(),'MANUAL_NOTE_ALREADY_ATTEMPTED')
@@ -308,7 +330,18 @@ def validated_probe(probe_ref):
     initial=check_pointer(inspected['initial_inspection']) if inspected.get('initial_inspection') else inspected
     nr.require(initial['attempt']==inspected['attempt'],'MANUAL_ATTEMPT_CHANGED')
     user=check_pointer(attempt['user']);parent=check_pointer(attempt['parent'])
-    for field in ('project','context_id','account_uid','profile_guard_key','profile_label','runtime'):
+    if attempt.get('account_attempt'):
+        reserved=check_pointer(attempt['account_attempt'])
+        nr.require(reserved.get('project')==attempt['project'] and
+                   reserved.get('parent_project')==attempt.get('parent_project',attempt['project']) and
+                   reserved.get('context_id')==parent['context_id'] and
+                   reserved.get('tab_id')==attempt['target']['tabId'] and
+                   reserved.get('stops')==attempt['stops'],'MANUAL_ATTEMPT_RESERVATION_CHANGED')
+    nr.require(probe['binding'].get('project')==attempt.get('project')==initial['binding'].get('project'),
+               'MANUAL_DESTINATION_PROJECT_CHANGED')
+    nr.require(attempt.get('parent_project',attempt['project'])==parent.get('project'),
+               'MANUAL_SOURCE_PROJECT_CHANGED')
+    for field in ('context_id','account_uid','profile_guard_key','profile_label','runtime'):
         nr.require(probe['binding'].get(field)==parent.get(field),'MANUAL_PARENT_IDENTITY_CHANGED')
     nr.require(user.get('user_statement') and user.get('normal_other_posts_statement'),'MANUAL_USER_RESTORATION_REQUIRED')
     nr.require(all(nr.stamp(user['processed_at'])>nr.stamp(s['at']) for s in attempt['stops'].values()),'MANUAL_CONFIRMATION_PREDATES_STOP')
@@ -321,7 +354,8 @@ def validated_probe(probe_ref):
     nr.require(note_id(capture['url']) in {note_id(c['url']) for c in search['cards']},'MANUAL_NOTE_NOT_IN_SEARCH')
     original=parent.get('tabs',{}).get('detail',{}).get('navigation_intent',{}).get('url')
     excluded=note_id(original) if original else None
-    nr.require(probe.get('excluded_note_id')==excluded and note_id(capture['url'])!=excluded,'ORIGINAL_RESTRICTED_NOTE_EXCLUDED')
+    nr.require(probe.get('excluded_note_id')==excluded and note_id(capture['url']) not in excluded_notes(parent),
+               'ORIGINAL_RESTRICTED_NOTE_EXCLUDED')
     for ref in attempt['frozen_stops'].values():check_pointer(ref)
     return probe,attempt,capture
 
@@ -382,7 +416,7 @@ def attest(probe_file,review_file,name):
         nr.require(nr.current_stops(keys)==attempt['stops'],'MANUAL_STOP_CHANGED')
         nr.require(not target.exists(),'MANUAL_NEW_BINDING_ALREADY_EXISTS')
         b.update(binding_name=name,binding_kind=GRANT_KIND,state='ready',
-                 manual_excluded_note_ids=[probe['excluded_note_id']] if probe.get('excluded_note_id') else [])
+                 manual_excluded_note_ids=excluded_notes(check_pointer(attempt['parent'])))
         b['tabs']['search']=b['tabs']['detail']
         root=Path(probe_file).parent
         review_ref=evidence(root/'codex-review.json',review)
@@ -419,7 +453,9 @@ def main():
     sub=p.add_subparsers(dest='command',required=True)
     s=sub.add_parser('inspect');s.add_argument('--project',type=Path,required=True);s.add_argument('--binding',required=True)
     s.add_argument('--metadata',type=Path,required=True);s.add_argument('--user',type=Path,required=True)
+    s.add_argument('--parent-project',type=Path)
     s=sub.add_parser('inspect-active');s.add_argument('--project',type=Path,required=True);s.add_argument('--binding',required=True);s.add_argument('--user',type=Path,required=True)
+    s.add_argument('--parent-project',type=Path)
     s=sub.add_parser('probe-note');s.add_argument('--inspection',type=Path,required=True);s.add_argument('--url',required=True)
     s=sub.add_parser('probe-search');s.add_argument('--inspection',type=Path,required=True);s.add_argument('--task',required=True)
     s=sub.add_parser('finish-search');s.add_argument('--inspection',type=Path,required=True)
@@ -427,8 +463,8 @@ def main():
     s=sub.add_parser('attest');s.add_argument('--probe',type=Path,required=True);s.add_argument('--review',type=Path,required=True);s.add_argument('--binding',required=True)
     s=sub.add_parser('recheck');s.add_argument('--project',type=Path,required=True);s.add_argument('--binding',required=True)
     a=p.parse_args()
-    if a.command=='inspect':result=inspect(a.project,a.binding,a.metadata,a.user)
-    elif a.command=='inspect-active':result=inspect_active(a.project,a.binding,a.user)
+    if a.command=='inspect':result=inspect(a.project,a.binding,a.metadata,a.user,a.parent_project)
+    elif a.command=='inspect-active':result=inspect_active(a.project,a.binding,a.user,a.parent_project)
     elif a.command=='probe-search':result=probe_search(a.inspection,a.task)
     elif a.command=='finish-search':result=finish_search(a.inspection)
     elif a.command=='finish-note':result=finish_note(a.inspection)
