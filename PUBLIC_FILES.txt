@@ -18,6 +18,7 @@ references/comment-structure-diagnostic.md
 references/continuous-run.md
 references/current-page-recovery.md
 references/current-search-recovery.md
+references/local-recall.md
 references/local-setup.md
 references/maintenance.md
 references/manual-tab-recovery.md
@@ -114,6 +115,7 @@ scripts/test_prepare_target_visibility.py
 scripts/test_project.py
 scripts/test_publication.py
 scripts/test_queue_independent.py
+scripts/test_recall.py
 scripts/test_recovery.py
 scripts/test_registered_window_state.mjs
 scripts/test_research.py
@@ -161,6 +163,7 @@ scripts/xhs_page_presence.py
 scripts/xhs_paths.py
 scripts/xhs_project.py
 scripts/xhs_queue.py
+scripts/xhs_recall.py
 scripts/xhs_recovery.py
 scripts/xhs_research.py
 scripts/xhs_research_desk.py
