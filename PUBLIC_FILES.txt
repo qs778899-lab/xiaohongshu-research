@@ -171,3 +171,7 @@ scripts/xhs_rounds.py
 scripts/xhs_search.py
 scripts/xhs_search_ab.py
 scripts/xhs_source404_recovery.py
+scripts/xhs_project_tab.py
+scripts/xhs_project_tab.mjs
+scripts/test_project_tab.py
+scripts/test_project_tab.mjs
