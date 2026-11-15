@@ -1,4 +1,4 @@
-"""Capture one already observed comment attachment on the current owned note tab.
+"""Capture one already observed comment attachment on the current verified note tab.
 
 No navigation, reply expansion, viewer click, URL refresh, CDN fetch or review receipt.
 Each attachment has one durable display transaction; uncertain mutations are not replayed.
@@ -17,7 +17,7 @@ from urllib.parse import urlparse
 import xhs_bridge as bridge
 import xhs_native as native
 
-REVISION='rendered-comment-attachment-v1'
+REVISION='rendered-comment-attachment-v2-bound-user-tab'
 PROPERTIES=('width','height','max-width','max-height','object-fit','overflow')
 ROLES=('image','imgBox','commentPicture')
 
@@ -198,9 +198,17 @@ def capture(project,binding,task_id,source_hash,comment_id,image_index,driver=No
     project=Path(project).resolve();b=bridge.load_binding(project,binding)
     require(b.get('state')=='ready','COMMENT_BINDING_NOT_READY')
     slot=b.get('tabs',{}).get('detail',{})
-    require(slot.get('owned') is True and bool(re.fullmatch(r'[A-Fa-f0-9]{32}',slot.get('page','')))
-            and slot.get('session') and not slot.get('navigation_intent'),'COMMENT_CURRENT_OWNED_NOTE_REQUIRED')
+    # A revalidated user tab is already authorized for rendered-page work.
+    # Its grant is rechecked by the lease and every guard; no tab selection,
+    # navigation or new recovery exception is introduced here.
+    user_tab=(b.get('manual_single_tab') is True and b.get('transport_surface')=='browser'
+              and slot.get('owned') is False and bool(b.get('manual_tab_revalidation'))
+              and bool(slot.get('chrome_tab_id')) and bool(slot.get('window_id')))
+    require((slot.get('owned') is True or user_tab)
+            and bool(re.fullmatch(r'[A-Fa-f0-9]{32}',slot.get('page','')))
+            and slot.get('session') and not slot.get('navigation_intent'),'COMMENT_CURRENT_BOUND_NOTE_REQUIRED')
     context=source_context(project,task_id,source_hash,comment_id,image_index,b['account_uid'])
+    require(context['note_id'] not in b.get('manual_excluded_note_ids',[]),'ORIGINAL_NOTE_ACCESS_UNRESOLVED')
     expected='/explore/'+context['note_id'];note_url(slot.get('last_url'),context['note_id'])
     scope=authority(b);own_driver=driver is None;driver=driver or bridge.Driver(b['runtime'])
     # The key excludes source hash/URL, so re-encoding an old source or rotating a
@@ -212,11 +220,12 @@ def capture(project,binding,task_id,source_hash,comment_id,image_index,driver=No
     def guard(keys):
         current=bridge.load_binding(project,binding)
         require(authority(current)==scope and authority(b)==scope,'COMMENT_BINDING_AUTHORITY_CHANGED')
+        require(context['note_id'] not in current.get('manual_excluded_note_ids',[]),'ORIGINAL_NOTE_ACCESS_UNRESOLVED')
         bridge.assert_web_project_access(project,b['account_uid'])
         exceptions=bridge.web_authorization_exceptions(project,b)
         from xhs_note_recovery import FORK_KIND,fork_path
         is_fork=bool(b.get('web_parent_authorization') or b.get('binding_kind')==FORK_KIND or fork_path(project,'names',binding).exists())
-        recovery={'project':str(project),'binding':binding} if b.get('note_unavailable_recovery') or is_fork else None
+        recovery={'project':str(project),'binding':binding} if b.get('note_unavailable_recovery') or is_fork or b.get('manual_tab_revalidation') else None
         bridge.identity.check_stops(keys,web_stop_exceptions=exceptions,web_note_recovery=recovery)
         if (project/'bridge'/'PAUSE').exists():raise bridge.BridgeError('USER_PAUSED')
         meta=bridge.verify_tab(driver,b,'detail');require(meta.get('page')==slot['page'],'TARGET_MISMATCH')

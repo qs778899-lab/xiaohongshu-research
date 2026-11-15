@@ -132,7 +132,7 @@ class CommentMediaTests(unittest.TestCase):
         self.source_file=directory/(self.source+'.json');self.source_file.write_bytes(payload)
         manifest=self.root/'manifest.json';manifest.write_text(json.dumps({'units':[{'stage':'images','target':NOTE,'sources':[str(self.source_file)],'next':'read one observed attachment'}]}))
         self.task=native.import_manifest(self.p,manifest)['task_ids'][0]
-    def run_capture(self,driver=None,source=None,comment_id=CID,image_index=1,verify_error=None,stop_error=None,authority_change=False):
+    def run_capture(self,driver=None,source=None,comment_id=CID,image_index=1,verify_error=None,stop_error=None,authority_change=False,visible=True,guard_error=None):
         self.driver=driver or DisplayDriver(self.p.path)
         loads=0
         def load(*args):
@@ -143,8 +143,9 @@ class CommentMediaTests(unittest.TestCase):
         def verify(*args):
             self.driver.actions.append('verify_tab')
             if verify_error and self.driver.shot:raise bridge.BridgeError(verify_error)
-            return {'page':PAGE,'url':URL,'visible':True}
+            return {'page':PAGE,'url':URL,'visible':visible}
         def stops(*args,**kwargs):
+            if guard_error:raise guard_error
             if stop_error and self.driver.shot:raise stop_error
         with ExitStack() as stack:
             stack.enter_context(patch.object(bridge,'load_binding',side_effect=load))
@@ -163,6 +164,74 @@ class CommentMediaTests(unittest.TestCase):
         paths=list((self.p.path/'bridge/comment-media').rglob('events.jsonl'));self.assertEqual(len(paths),1)
         return [json.loads(line) for line in paths[0].read_text().splitlines()]
     def mutations(self,driver):return [x for x in driver.actions if x in {'comment_media_focus','comment_media_enlarge','comment_media_restore'}]
+    def user_binding(self):
+        self.binding.update(manual_single_tab=True,transport_surface='browser',
+                            manual_tab_revalidation={'file':'synthetic-grant','sha256':'1'*64})
+        self.binding['tabs']['detail'].update(owned=False,chrome_tab_id=42,window_id=7)
+        self.binding['tabs']['search']=copy.deepcopy(self.binding['tabs']['detail'])
+    def test_verified_visible_user_tab_captures_without_navigation_or_activation(self):
+        self.user_binding();driver=DisplayDriver(self.p.path)
+        result=self.run_capture(driver)
+        self.assertEqual(result['outcome'],'captured');self.assertTrue(result['display_restored'])
+        self.assertFalse(result['reviewed']);self.assertFalse(result['complete'])
+        self.assertEqual(self.mutations(driver),['comment_media_focus','comment_media_enlarge','comment_media_restore'])
+        for action in ['activate','navigate','reload','create','close']:
+            self.assertNotIn(action,driver.actions)
+        self.assertTrue(self.stop_guard.call_args_list)
+        for call in self.stop_guard.call_args_list:
+            self.assertEqual(call.kwargs['web_note_recovery'],{'project':str(self.p.path),'binding':'test'})
+    def test_incomplete_user_binding_is_rejected_before_browser_actions(self):
+        for mode in ['grant','surface','manual','chrome_tab_id','window_id','session','navigation_intent']:
+            with self.subTest(mode=mode):
+                case=CommentMediaTests();case.setUp()
+                try:
+                    case.user_binding();slot=case.binding['tabs']['detail']
+                    if mode=='grant':case.binding.pop('manual_tab_revalidation')
+                    elif mode=='surface':case.binding['transport_surface']='adapter'
+                    elif mode=='manual':case.binding['manual_single_tab']=False
+                    elif mode=='navigation_intent':slot[mode]={'url':URL}
+                    else:slot.pop(mode)
+                    driver=DisplayDriver(case.p.path)
+                    with self.assertRaisesRegex(bridge.BridgeError,'COMMENT_CURRENT_BOUND_NOTE_REQUIRED'):
+                        case.run_capture(driver)
+                    self.assertEqual(driver.actions,[])
+                finally:case.tearDown()
+    def test_original_excluded_note_is_rejected_before_browser_action(self):
+        self.user_binding();self.binding['manual_excluded_note_ids']=[NOTE]
+        driver=DisplayDriver(self.p.path)
+        with self.assertRaisesRegex(bridge.BridgeError,'ORIGINAL_NOTE_ACCESS_UNRESOLVED'):
+            self.run_capture(driver)
+        self.assertEqual(driver.actions,[])
+        self.assertFalse((self.p.path/'bridge/comment-media').exists())
+    def test_other_excluded_note_does_not_block_authorized_current_note(self):
+        self.user_binding();self.binding['manual_excluded_note_ids']=['9'*24]
+        self.assertEqual(self.run_capture()['outcome'],'captured')
+    def test_cached_capture_does_not_bypass_current_note_exclusion(self):
+        self.user_binding();self.run_capture()
+        self.binding['manual_excluded_note_ids']=[NOTE];driver=DisplayDriver(self.p.path)
+        with self.assertRaisesRegex(bridge.BridgeError,'ORIGINAL_NOTE_ACCESS_UNRESOLVED'):
+            self.run_capture(driver)
+        self.assertEqual(driver.actions,[])
+    def test_hidden_user_tab_is_not_activated_or_mutated(self):
+        self.user_binding();driver=DisplayDriver(self.p.path)
+        with self.assertRaisesRegex(bridge.BridgeError,'COMMENT_TARGET_VISIBILITY_UNCONFIRMED'):
+            self.run_capture(driver,visible=False)
+        self.assertEqual(driver.actions,['verify_tab'])
+        self.assertFalse((self.p.path/'bridge/comment-media').exists())
+    def test_user_grant_or_stop_rejection_prevents_display_transaction(self):
+        for error in [bridge.BridgeError('MANUAL_STOP_CHANGED'),bridge.BridgeError('MANUAL_AUTHORITY_CHANGED')]:
+            with self.subTest(error=error.code):
+                self.user_binding();driver=DisplayDriver(self.p.path)
+                with self.assertRaisesRegex(bridge.BridgeError,error.code):
+                    self.run_capture(driver,guard_error=error)
+                self.assertEqual(driver.actions,[])
+                self.assertFalse((self.p.path/'bridge/comment-media').exists())
+    def test_user_tab_new_stop_after_capture_preserves_unknown_state_without_restore(self):
+        self.user_binding();driver=DisplayDriver(self.p.path)
+        with self.assertRaisesRegex(bridge.BridgeError,'MANUAL_STOP_CHANGED'):
+            self.run_capture(driver,stop_error=bridge.BridgeError('MANUAL_STOP_CHANGED'))
+        self.assertNotIn('comment_media_restore',driver.actions)
+        self.assertFalse(self.result()['display_restored'])
     def test_single_attachment_known_path_captures_restores_and_never_marks_read_or_whole_scope(self):
         before=[tuple(r) for r in self.p.db.execute('SELECT * FROM tasks')];driver=DisplayDriver(self.p.path)
         result=self.run_capture(driver)
