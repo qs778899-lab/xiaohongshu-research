@@ -5,7 +5,7 @@ import {fileURLToPath} from 'node:url';
 const here=path.dirname(fileURLToPath(import.meta.url));
 const candidate=fs.readFileSync(path.join(here,'xhs_bridge_driver.mjs'),'utf8');
 const split=source=>{
-  const start=source.indexOf('export function scrollDiagnoseDom() {');
+  const start=source.indexOf('export function scrollDiagnoseDom(');
   const end=source.indexOf('\nfunction domSource(fn)',start);
   assert(start>=0&&end>start);return {before:source.slice(0,start),fn:source.slice(start,end),after:source.slice(end)};
 };

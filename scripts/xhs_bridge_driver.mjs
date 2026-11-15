@@ -5,6 +5,14 @@ import {pathToFileURL} from 'node:url';
 import {connectorStatus, startConnector} from './xhs_connector_health.mjs';
 import {buildDeepExtractor} from './deep_comments.mjs';
 
+export function requireScrollDiagnosticTarget(cfg) {
+  if (cfg.stage === 'search' && typeof cfg.query === 'string' && cfg.query.trim() &&
+      /^\/search_result\/?$/.test(cfg.expectedPath || '')) return;
+  if (cfg.stage === 'author' && !cfg.query &&
+      /^\/user\/profile\/[a-f0-9]{24}\/?$/.test(cfg.expectedPath || '')) return;
+  throw new Error(cfg.stage === 'author' ? 'AUTHOR_TARGET_REQUIRED' : 'QUERY_TARGET_REQUIRED');
+}
+
 export function publicUrl(value) {
   const u = new URL(value);
   if (u.origin==='https://www.xiaohongshu.com' &&
@@ -142,7 +150,7 @@ export function selectResults() {
 }
 
 // Read-only geometry for diagnosing a selected element versus viewport mismatch.
-export function scrollDiagnoseDom() {
+export function scrollDiagnoseDom({includeListingText=true}={}) {
   const box=e=>{
     if(!e)return null;
     const r=e.getBoundingClientRect(),style=getComputedStyle(e);
@@ -157,15 +165,22 @@ export function scrollDiagnoseDom() {
   const chosen=selectResults();
   const containers=[...document.querySelectorAll('.feeds-container,.search-result-container,.search-layout,.main-content')]
     .slice(0,12).map(e=>{const chain=[];for(let x=e;x && chain.length<24;x=x.parentElement)chain.push(box(x));return chain;});
-  const listingScope=chosen?.scope?.closest?.('.search-layout__main,.search-layout') || chosen?.scope;
-  const listingText=String(listingScope?.innerText || '').trim();
-  const listingAncestors=[];
-  for(let e=chosen?.scope?.parentElement;e && !['BODY','HTML'].includes(e.tagName) && listingAncestors.length<4;e=e.parentElement) {
-    const value=String(e.innerText || '').trim();
-    listingAncestors.push({tagName:e.tagName,className:String(e.className || ''),textPrefix:value.slice(0,1500),textLength:value.length,truncated:value.length>1500});
+  let renderedListing;
+  if (includeListingText) {
+    const listingScope=chosen?.scope?.closest?.('.search-layout__main,.search-layout') || chosen?.scope;
+    const listingText=String(listingScope?.innerText || '').trim();
+    const listingAncestors=[];
+    for(let e=chosen?.scope?.parentElement;e && !['BODY','HTML'].includes(e.tagName) && listingAncestors.length<4;e=e.parentElement) {
+      const value=String(e.innerText || '').trim();
+      listingAncestors.push({tagName:e.tagName,className:String(e.className || ''),textPrefix:value.slice(0,1500),textLength:value.length,truncated:value.length>1500});
+    }
+    const searchInputs=[...document.querySelectorAll('input[placeholder*="搜索"],input.search-input,#search-input')]
+      .filter(e=>e.getClientRects?.().length).slice(0,3).map(e=>({value:String(e.value || '').slice(0,200),placeholder:String(e.placeholder || '').slice(0,200)}));
+    renderedListing={textPrefix:listingText.slice(0,2500),
+      textSuffix:listingText.length>2500?listingText.slice(-1000):'',
+      textLength:listingText.length,truncated:listingText.length>3500,searchInputs,listingAncestors,
+      diagnosticOnly:true,notAnEndSignal:true};
   }
-  const searchInputs=[...document.querySelectorAll('input[placeholder*="搜索"],input.search-input,#search-input')]
-    .filter(e=>e.getClientRects?.().length).slice(0,3).map(e=>({value:String(e.value || '').slice(0,200),placeholder:String(e.placeholder || '').slice(0,200)}));
   // Bounded CSSOM/geometry only. Never return sheet URLs, CSS text, attribute
   // selectors, arbitrary custom-property contents, card titles or link tokens.
   const limits={nodes:12,variablesPerNode:8,sheets:24,rules:2000,depth:6,matchedRules:32,declarationsPerRule:8,cards:6,cardLinks:96};
@@ -288,9 +303,7 @@ export function scrollDiagnoseDom() {
       ...(transform.length<=512 && /^(?:none|(?:matrix|matrix3d)\([\d\s.,eE+\-]+\))$/.test(transform)?{transform}:{transformOmitted:true})});seenCards.add(noteId);
   }
   return {readOnly:true,compatMode:document.compatMode,
-    renderedListing:{textPrefix:listingText.slice(0,2500),textSuffix:listingText.length>2500?listingText.slice(-1000):'',
-      textLength:listingText.length,truncated:listingText.length>3500,searchInputs,listingAncestors,
-      diagnosticOnly:true,notAnEndSignal:true},
+    ...(renderedListing ? {renderedListing} : {}),
     viewport:{innerHeight:window.innerHeight,innerWidth:window.innerWidth,scrollY:window.scrollY,
       scrollX:window.scrollX,pageYOffset:window.pageYOffset,
       visualViewport:window.visualViewport ? {height:window.visualViewport.height,width:window.visualViewport.width,
@@ -1238,8 +1251,8 @@ async function main(cfg) {
         `(${domSource(inspectDom)})(${JSON.stringify({...args,guardOnly:true})})`);
     }
     if (cfg.action==='scroll_diagnose') {
-      if (cfg.stage!=='search' || !cfg.query || !/^\/search_result\/?$/.test(cfg.expectedPath || '')) throw new Error('QUERY_TARGET_REQUIRED');
-      return await evaluateOnce(`(()=>{const c=(${domSource(inspectDom)})(${JSON.stringify({...args,guardOnly:true})});if(c.error)return c;return {url:c.url,uid:c.uid,...(${domSource(scrollDiagnoseDom)})({})}})()`);
+      requireScrollDiagnosticTarget(cfg);
+      return await evaluateOnce(`(()=>{const c=(${domSource(inspectDom)})(${JSON.stringify({...args,guardOnly:true})});if(c.error)return c;return {url:c.url,uid:c.uid,...(${domSource(scrollDiagnoseDom)})(${JSON.stringify({includeListingText:cfg.stage==='search'})})}})()`);
     }
     if (cfg.action==='capture') return await evaluateOnce(`(${domSource(inspectDom)})(${JSON.stringify(args)})`);
     if (cfg.action==='advance') {

@@ -1,13 +1,13 @@
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
-import {selectResults,inspectDom,scrollDiagnoseDom} from './xhs_bridge_driver.mjs';
+import {selectResults,inspectDom,scrollDiagnoseDom,requireScrollDiagnosticTarget} from './xhs_bridge_driver.mjs';
 
 const driver=fs.readFileSync(new URL('./xhs_bridge_driver.mjs',import.meta.url),'utf8');
 const definition=driver.match(/function domSource\(fn\) \{[\s\S]*?\n\}/)[0];
 const serialize=Function('selectResults',`${definition};return domSource`)(selectResults);
 const uid='a'.repeat(24),query='示例机构 测试丙';
 const opts={uid,query,stage:'search',expectedPath:'/search_result',guardOnly:true};
-const diagnostic=eval(`(()=>{const guard=${serialize(inspectDom)},diagnose=${serialize(scrollDiagnoseDom)};return opts=>{const c=guard(opts);if(c.error)return c;return {url:c.url,uid:c.uid,...diagnose({})};};})()`);
+const diagnostic=eval(`(()=>{const guard=${serialize(inspectDom)},diagnose=${serialize(scrollDiagnoseDom)};return opts=>{const c=guard(opts);if(c.error)return c;return {url:c.url,uid:c.uid,...diagnose({includeListingText:opts.stage==='search'})};};})()`);
 const mutation=()=>{throw Error('diagnostic must never scroll or interact');};
 function element(tag,h,ch,overflow,parent=null){return {tagName:tag,className:tag.toLowerCase(),scrollHeight:h,clientHeight:ch,scrollTop:0,overflow,parentElement:parent,
   getClientRects:()=>[{}],getBoundingClientRect:()=>({x:0,y:0,width:1200,height:ch}),scrollTo:mutation,scrollBy:mutation,click:mutation};}
@@ -50,3 +50,26 @@ assert.equal(diagnostic({...opts,query:'另一查询'}).error,'QUERY_MISMATCH');
 location.href='https://www.xiaohongshu.com/website-login/error?error_code=300017';
 assert.equal(diagnostic(opts).error,'ACCESS_STOP');
 console.log('scroll diagnostic: 7 read-only/serialization/guard scenarios passed');
+
+const authorPath='/user/profile/'+ 'c'.repeat(24);
+const authorOpts={uid,stage:'author',expectedPath:authorPath,guardOnly:true};
+requireScrollDiagnosticTarget(opts);
+requireScrollDiagnosticTarget(authorOpts);
+for(const invalid of [{stage:'author'}, {...authorOpts,expectedPath:authorPath+'/note'},
+  {...authorOpts,query:'unrelated'}, {...authorOpts,stage:'body'},
+  {...opts,query:'  '}, {...opts,expectedPath:'/explore/'+ 'd'.repeat(24)}]) {
+  assert.throws(()=>requireScrollDiagnosticTarget(invalid),/(?:AUTHOR|QUERY)_TARGET_REQUIRED/);
+}
+location.href='https://www.xiaohongshu.com'+authorPath;
+roots=[root];extraRoots=[root];
+Object.defineProperty(root,'innerText',{get(){throw Error('author diagnostic must not read listing text');}});
+const authorResult=diagnostic(authorOpts);
+assert.equal(authorResult.readOnly,true);
+assert.equal(Object.hasOwn(authorResult,'renderedListing'),false);
+const authorBefore=styleReads;
+assert.equal(diagnostic({...authorOpts,expectedPath:'/user/profile/'+ 'e'.repeat(24)}).error,'TARGET_MISMATCH');
+assert.equal(diagnostic({...authorOpts,uid:'f'.repeat(24)}).error,'ACCOUNT_MISMATCH');
+assert.equal(styleReads,authorBefore);
+location.href='https://www.xiaohongshu.com/website-login/error?error_code=300017';
+assert.equal(diagnostic(authorOpts).error,'ACCESS_STOP');
+console.log('author diagnostics: exact target, scope and read-only guards passed');

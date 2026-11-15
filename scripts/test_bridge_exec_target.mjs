@@ -5,7 +5,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {pathToFileURL} from 'node:url';
 import {executeBoundDom,captureBoundScreenshot,publicUrl,requirePinnedProfile,
-  inspectDom,selectResults,scrollDiagnoseDom,commentMediaStateDom,commentStructureDom,carouselDom,advanceDom} from './xhs_bridge_driver.mjs';
+  inspectDom,selectResults,scrollDiagnoseDom,requireScrollDiagnosticTarget,commentMediaStateDom,commentStructureDom,carouselDom,advanceDom} from './xhs_bridge_driver.mjs';
 
 import {connectorStatus} from './xhs_connector_health.mjs';
 
@@ -68,7 +68,7 @@ const invoke=async(action,options={})=>{
   };
   const context={fs:{readFileSync:()=>JSON.stringify({name:'@jackwener/opencli',version:'2.0.2'})},path,pathToFileURL,URL,
     publicUrl,requirePinnedProfile,executeBoundDom,captureBoundScreenshot,domSource,inspectDom,commentMediaStateDom,commentStructureDom,connectorStatus,
-    scrollDiagnoseDom,carouselDom,advanceDom,buildDeepExtractor:()=>'(synthetic bounded deep expression)',
+    scrollDiagnoseDom,requireScrollDiagnosticTarget,carouselDom,advanceDom,buildDeepExtractor:()=>'(synthetic bounded deep expression)',
     fixtureAdapter:{buildCommentsExtractJs:()=>{}},fixtureLoad:async name=>{assert.ok(name in modules,name);return modules[name];}};
   vm.createContext(context);vm.runInContext(mainCode+';globalThis.run=main;',context);
   try {return {result:await context.run({...base,action,...options.cfg}),calls,pageCalls};}
@@ -117,4 +117,29 @@ for(const guardError of ['ACCOUNT_MISMATCH','ACCESS_STOP']) {
   const data={body:'unchanged payload',results:[{commentId:'3'.repeat(24),text:'full comment'}],deepCoverage:{rootPaginationState:'pending'}};
   const result=await invoke('capture',{data});assert.equal(result.result,data,'validated data shape/object remains unchanged');checks++;
 }
-console.log(`PASS: ${checks} bound DOM exec cases, actual dispatch paths offline, no browser/network`);
+
+// Author diagnostics use the bound page and do not interact with it.
+const authorCfg={stage:'author',expectedPath:'/user/profile/'+ 'c'.repeat(24)};
+for(const surface of ['adapter','browser']) {
+ const v=await invoke('scroll_diagnose',{cfg:{...authorCfg,surface}});
+ assert.equal(v.error,undefined);
+ assert.equal(v.calls.length,2);
+ assert.match(v.calls[1].params.code,/"includeListingText":false/);
+ assert.ok(v.calls.every(x=>x.type==='exec' && x.params.page===target && x.params.surface===surface));
+ assert.deepEqual(v.pageCalls,[['bind',target],['close-reference']]);
+ checks++;
+}
+for(const options of [{wrongAt:2},{missingAt:2},{throwAt:2}]) {
+ const v=await invoke('scroll_diagnose',{...options,cfg:authorCfg});
+ assert.ok(v.error);assert.equal(v.result,undefined);assert.equal(v.calls.length,2);
+ assert.deepEqual(v.pageCalls,[['bind',target],['close-reference']]);checks++;
+}
+for(const guardError of ['ACCOUNT_MISMATCH','ACCESS_STOP','TARGET_MISMATCH']) {
+ const v=await invoke('scroll_diagnose',{cfg:authorCfg,errorAt:2,guardError});
+ assert.equal(v.result.error,guardError);assert.equal(v.calls.length,2);
+ assert.deepEqual(v.pageCalls,[['bind',target],['close-reference']]);checks++;
+}
+for(const [cfg,error] of [[{stage:'search',expectedPath:'/search_result',query:' '},'QUERY_TARGET_REQUIRED'],[{stage:'body',expectedPath:'/explore/'+note},'QUERY_TARGET_REQUIRED'],[{stage:'author',expectedPath:'/user/profile/'+ 'c'.repeat(24)+'/note'},'AUTHOR_TARGET_REQUIRED']]) {
+ const v=await invoke('scroll_diagnose',{cfg});assert.equal(v.error.message,error);assert.equal(v.calls.length,1);checks++;
+}
+console.log(`PASS: bound DOM exec checks, including author diagnostics: ${checks}`);
