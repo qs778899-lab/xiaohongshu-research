@@ -71,7 +71,7 @@ worker 消费现有 SQLite 中的 native 研究任务。API 任务仍保留原�
 
 - `CONTENT_LOADING`：有限等待；后台未渲染时最多激活一次本角色标签，不请求窗口前置。仍失败时同一目标最多一次持久化重载，进程重启不重置次数。
 - `TARGET_MISSING`：先检查原角色租约，空列表不证明标签已关闭。`recover`对本项目自有目标使用已核对的扩展1.0.26精确ID探测：只有明确返回该ID不存在，才归档旧目标并在同一contextId、项目及角色session中重建、重新核验UID；创建结果不明不重复。目标仍在但租约丢失、探测异常或身份不符时保持断点。不能由用户未关闭窗口推断标签ID仍存在，也不能由两个对话并行推断另一对话关闭了标签。
-- `SCOPE_CHANGED`、`UNEXPECTED_TARGET_CHANGE`、`ACCOUNT_MISMATCH`：保持原绑定和断点，不切换目标。上次位置与本次已登记导航意图都不匹配时，先于正文读取停止。仅精确 `explore?source=404` 首页且原网页凭据仍有效的情况，可按[单次页级恢复](source404-recovery.md)核对同一自有标签并隔离原失败链接。
+- `SCOPE_CHANGED`、`UNEXPECTED_TARGET_CHANGE`、`ACCOUNT_MISMATCH`：保持原绑定和断点，不切换目标。上次位置与本次已登记导航意图都不匹配时，先于正文读取停止。仅精确 `explore?source=404` 首页且原网页凭据仍有效的情况，可按[单次页级恢复](source404-recovery.md)核对同一自有标签或已核验用户标签并隔离原失败链接；已有持续恢复授权时自主执行，不逐次要求用户重开。
 - `SPECIFIED_PROFILE_OFFLINE`：同配置连接恢复后 recover；没有默认账号回退。
 - `CONNECTOR_OFFLINE`：检查本地 daemon，必要时用 doctor 的显式启动选项；不等同于需要重新登录。
 - `ACCESS_STOP`：写共享账号 STOP，停止采集；不因更换连接器解除。精确单帖300031另按下节的 `probe / attest` 核验；原错误类型未知、用户确认当前原失败帖正常时，仅按[原失败帖当前状态复核](current-page-recovery.md)的一次原页核验处理。两类流程独立，诊断本身不恢复采集。 搜索导航后的identity失败、用户确认当前页正常且原查询仍在时，另见[原失败搜索页的单次只读复核](current-search-recovery.md)；不冒用笔记页恢复或清除STOP。

@@ -1,4 +1,4 @@
-"""One owned-page source=404 redirect recovery under an existing web lease.
+"""One bound-page source=404 redirect recovery under an existing web lease.
 
 No new authorization, account proof, session, reload or core-code changes.
 """
@@ -27,10 +27,16 @@ def restore(project,name,task_id,driver=None):
         with batch_lock(p.path/'bridge/runner'),xp.project_lock(project):
             b=bridge.load_binding(project,name);slot=b.get('tabs',{}).get('detail',{})
             original=copy.deepcopy(b);task=p.task(task_id)
-            require(b.get('state')=='blocked' and b.get('last_error',{}).get('code')=='SCOPE_CHANGED',
+            require(b.get('state')=='blocked' and b.get('last_error',{}).get('code') in
+                    {'SCOPE_CHANGED','UNEXPECTED_TARGET_CHANGE'},
                     'SOURCE404_PAGE_SCOPE_FAILURE_REQUIRED')
-            require(slot.get('owned') is True and slot.get('page') and slot.get('session')
+            manual=bool(b.get('manual_tab_revalidation') and b.get('manual_single_tab') is True
+                        and b.get('transport_surface')=='browser' and slot.get('owned') is False)
+            require((slot.get('owned') is True or manual) and slot.get('page') and slot.get('session')
                     and slot.get('verified_at'),'SOURCE404_EXISTING_OWNED_DETAIL_REQUIRED')
+            if manual:
+                require(type(slot.get('chrome_tab_id')) is int and type(slot.get('window_id')) is int,
+                        'SOURCE404_MANUAL_NATIVE_IDS_REQUIRED')
             require(task.get('kind')=='native' and task.get('status')=='pending'
                     and task['payload'].get('stage') in {'body','roots','replies','images','video'},
                     'SOURCE404_PENDING_NOTE_TASK_REQUIRED')
@@ -42,6 +48,8 @@ def restore(project,name,task_id,driver=None):
                 return path.rsplit('/',1)[1]
             require(note(failed)==task['payload']['target'] and note(target)!=note(failed)
                     and bridge.observed_url(project,task)==failed,'SOURCE404_FAILED_OBSERVED_SOURCE_REQUIRED')
+            require(note(target) not in b.get('manual_excluded_note_ids',[]),
+                    'ORIGINAL_RESTRICTED_NOTE_EXCLUDED')
             key=xp.digest({'kind':KIND,'project':str(p.path.resolve()),'binding':name,
                 'uid':b['account_uid'],'page':slot['page'],'session':slot['session'],
                 'failed_url':failed,'restore_url':target})
@@ -51,17 +59,29 @@ def restore(project,name,task_id,driver=None):
             with bridge.lease(project,b) as keys:
                 stops=nr.current_stops(keys)
                 source=None
-                pointer=b.get('current_page_revalidation',{})
-                grant,_=nr.read_json(pointer.get('file'),pointer.get('sha256'))
-                require(grant.get('kind')=='same-target-rendered-page-presence_v1','SOURCE404_EXISTING_PAGE_PRESENCE_GRANT_REQUIRED')
-                evidence=nr.check_ref(p,grant['evidence']);cap_ref=evidence['sources']['capture']
-                if nr.check_ref(p,cap_ref).get('result',{}).get('url')==target:source=cap_ref
+                if manual:
+                    from xhs_manual_tab_recovery import check_pointer, require_capture, proof_args
+                    grant=check_pointer(b['manual_tab_revalidation'])
+                    cap_ref=check_pointer(grant['probe'])['capture']
+                    if check_pointer(cap_ref).get('url')==target:source=cap_ref
+                else:
+                    pointer=b.get('current_page_revalidation',{})
+                    grant,_=nr.read_json(pointer.get('file'),pointer.get('sha256'))
+                    require(grant.get('kind')=='same-target-rendered-page-presence_v1','SOURCE404_EXISTING_PAGE_PRESENCE_GRANT_REQUIRED')
+                    evidence=nr.check_ref(p,grant['evidence']);cap_ref=evidence['sources']['capture']
+                    if nr.check_ref(p,cap_ref).get('result',{}).get('url')==target:source=cap_ref
                 if source is None:
-                    for file in sorted((p.path/'bridge/raw').glob('*.json')):
+                    # Imported captures retain their original account and content hash.
+                    # Deep-comment snapshots alone have no UID and cannot establish this source.
+                    files=list((p.path/'bridge/raw').glob('*.json'))+list((p.path/'native-sources').glob('*'))
+                    for file in sorted(files):
+                        if not file.is_file():continue
                         if not re.fullmatch('[a-f0-9]{64}',file.stem) or file.is_symlink():continue
                         raw=file.read_bytes()
                         if hashlib.sha256(raw).hexdigest()!=file.stem:continue
-                        value=json.loads(raw)
+                        try:value=json.loads(raw)
+                        except (ValueError,UnicodeError):continue
+                        if not isinstance(value,dict):continue
                         if value.get('url')==target and value.get('uid')==b['account_uid'] and value.get('stage') in {'body','roots','replies'}:
                             source={'file':str(file),'sha256':file.stem};break
                 require(source,'SOURCE404_RESTORE_SOURCE_REQUIRED')
@@ -82,12 +102,19 @@ def restore(project,name,task_id,driver=None):
                 observations={};stage='driver_initialization'
                 try:
                     driver=driver or bridge.Driver(b['runtime'])
-                    def call(action,**kwargs):
+                    def call(action,label=None,**kwargs):
                         nonlocal stage
                         stage=action;value=driver.call(action,b,'detail',**kwargs)
-                        file=directory/(action+'.json');nr.immutable(file,{'at':xp.legacy.now(),'result':value})
-                        observations[action]={'file':str(file),'sha256':hashlib.sha256(file.read_bytes()).hexdigest()}
+                        label=label or action
+                        file=directory/(label+'.json');nr.immutable(file,{'at':xp.legacy.now(),'result':value})
+                        observations[label]={'file':str(file),'sha256':hashlib.sha256(file.read_bytes()).hexdigest()}
                         return value
+                    def verify_manual_native(url,label):
+                        found=call('locate_registered_url',label=label,url=url)
+                        require(sum(t.get('tabId')==slot['chrome_tab_id'] and
+                                    t.get('windowId')==slot['window_id'] and t.get('url')==url
+                                    for t in found.get('matches',[]))==1,
+                                'SOURCE404_MANUAL_TAB_CHANGED')
                     meta=call('metadata')
                     bridge.safe_url(meta.get('url'))
                     require(meta.get('page')==slot['page'] and meta.get('url')==HOME,'SOURCE404_EXACT_HOME_REQUIRED')
@@ -96,10 +123,12 @@ def restore(project,name,task_id,driver=None):
                             and ident.get('uid')==b['account_uid'] and not ident.get('error')
                             and not any(ident.get(k) for k in ('loginWall','securityBlock','notFound')),
                             'SOURCE404_SAME_ACCOUNT_REQUIRED')
-                    lease_state=call('lease_status')
-                    require(lease_state.get('expectedPage')==slot['page'] and lease_state.get('matching')==1
-                            and lease_state.get('leaseTabCount')==1 and lease_state.get('tabs')==[{'page':slot['page'],'url':HOME}],
-                            'SOURCE404_OWN_SINGLE_PAGE_REQUIRED')
+                    if manual:verify_manual_native(HOME,'native_before')
+                    else:
+                        lease_state=call('lease_status')
+                        require(lease_state.get('expectedPage')==slot['page'] and lease_state.get('matching')==1
+                                and lease_state.get('leaseTabCount')==1 and lease_state.get('tabs')==[{'page':slot['page'],'url':HOME}],
+                                'SOURCE404_OWN_SINGLE_PAGE_REQUIRED')
                     # Isolate only this exact failed source; save all old payloads first.
                     for item in affected:
                         bridge.hold_task(p,item['id'],HOLD)
@@ -115,6 +144,11 @@ def restore(project,name,task_id,driver=None):
                     stage='verify_tab';verified=bridge.verify_tab(driver,b,'detail')
                     require(verified.get('page')==slot['page'] and bridge.target_path(urlparse(verified['url']).path)
                             ==bridge.target_path(urlparse(target).path),'SOURCE404_RESTORE_TARGET_CHANGED')
+                    if manual:
+                        verify_manual_native(verified['url'],'native_after')
+                        args=proof_args(target)
+                        capture=call('capture',**args)
+                        require_capture(capture,b,args)
                     # All original grant sources, code and STOP hashes still govern.
                     nr.web_exceptions(project,name,keys)
                     after=nr.current_stops(keys)
@@ -125,6 +159,9 @@ def restore(project,name,task_id,driver=None):
                     bridge.save_binding(project,name,b)
                     result={'at':xp.legacy.now(),'verified':verified,'held_tasks':[t['id'] for t in affected],
                         'original_source_cause':'unknown','stop_bytes_unchanged':True,'navigation_calls':1}
+                    if manual:
+                        result.update(capture=observations['capture'],body_read=False,comments_read=False,
+                                      media_read=False,no_tasks_completed=True)
                     nr.immutable(directory/'success.json',result);return result
                 except BaseException as exc:
                     nr.immutable(directory/'failure.json',{'at':xp.legacy.now(),'stage':stage,
