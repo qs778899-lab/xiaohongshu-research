@@ -37,8 +37,43 @@ def create_home(parent, meta):
     return packet['data']
 
 
+def validate_historical_preparation(project, b, grant, keys):
+    """Verify an archived preparation, without granting current web access.
+
+    A completed preparation remains a historical fact after collector code
+    changes. Its immutable search, note and review chain must still validate,
+    and all other authority and STOP checks remain in force. Current access is
+    checked separately by prepare's parent lease; never use this function as a
+    substitute for manual.web_exceptions.
+    """
+    nr.require(grant.get('kind') == manual.GRANT_KIND
+               and grant.get('scope') == 'rendered_public_web_only',
+               'MANUAL_GRANT_SCOPE_CHANGED')
+    nr.require(Path(project).resolve() == Path(b['project']).resolve(), 'MANUAL_PROJECT_CHANGED')
+    nr.require(grant.get('authority') == manual.authority(b), 'MANUAL_AUTHORITY_CHANGED')
+    fingerprint = grant.get('code_fingerprint')
+    nr.require(isinstance(fingerprint, dict) and set(fingerprint) == {
+        'xhs_manual_tab_recovery.py', 'xhs_bridge.py',
+        'xhs_bridge_driver.mjs', 'xhs_note_recovery.py'}
+        and all(isinstance(value, str) and len(value) == 64
+                and set(value) <= set('0123456789abcdef') for value in fingerprint.values()),
+        'PROJECT_TAB_HISTORICAL_FINGERPRINT_INVALID')
+    nr.require(b.get('transport_surface') == 'browser' and b.get('manual_single_tab') is True,
+               'MANUAL_TRANSPORT_CHANGED')
+    nr.require(set(b.get('tabs', {})) == {'search', 'detail'}
+               and all(s.get('owned') is False for s in b['tabs'].values()),
+               'MANUAL_USER_TAB_OWNERSHIP_CHANGED')
+    probe, attempt, _ = manual.validated_probe(grant['probe'])
+    manual.validate_review(manual.check_pointer(grant['review']), probe)
+    nr.require(grant['stops'] == attempt['stops'] == nr.current_stops(keys), 'MANUAL_STOP_CHANGED')
+    expected = dict(probe['binding'], binding_name=b['binding_name'],
+                    manual_excluded_note_ids=b['manual_excluded_note_ids'])
+    nr.require(manual.authority(expected) == manual.authority(b), 'MANUAL_PROBE_BINDING_CHANGED')
+    return probe
+
+
 def completed_preparation(record, keys):
-    """Home inspection is not enough: require the same fresh attested web grant."""
+    """Require an intact historical search, note and review for the old tab."""
     done = record.with_suffix('.done.json')
     nr.require(done.exists(), 'PROJECT_TAB_PRIOR_OUTCOME_REQUIRES_DIAGNOSIS')
     result, _ = nr.read_json(done)
@@ -50,8 +85,7 @@ def completed_preparation(record, keys):
     nr.require(b.get('manual_tab_revalidation') == manual.pointer(grant_file), 'PROJECT_TAB_GRANT_CHANGED')
     nr.require(b['tabs']['detail']['page'] == inspected['binding']['tabs']['detail']['page'],
                'PROJECT_TAB_ATTESTATION_TARGET_CHANGED')
-    manual.web_exceptions(b['project'], b, keys)
-    probe = manual.check_pointer(grant['probe'])
+    probe = validate_historical_preparation(inspected['binding']['project'], b, grant, keys)
     search = manual.check_pointer(probe['inspection'])
     nr.require(search.get('initial_inspection') == result['inspection'], 'PROJECT_TAB_INSPECTION_CHANGED')
 

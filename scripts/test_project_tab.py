@@ -1,10 +1,13 @@
 import contextlib
+import copy
 import json
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 import xhs_project_tab as t
+import xhs_manual_tab_recovery as m
+import test_manual_tab_recovery as manual_fixtures
 
 class ProjectTabTests(unittest.TestCase):
  def setUp(self):
@@ -69,5 +72,151 @@ class ProjectTabTests(unittest.TestCase):
   load.assert_not_called()
  def test_same_project_rejected(self):
   with self.assertRaisesRegex(Exception,'DISTINCT_PROJECT'):t.prepare(self.source,self.source,'test','yes')
+
+class HistoricalPreparationTests(unittest.TestCase):
+ def setUp(self):
+  # Use the actual manual probe/review validators with synthetic archived data.
+  self.fixture=manual_fixtures.ManualTabTests(methodName='runTest');self.fixture.setUp()
+  self.addCleanup(self.fixture.doCleanups)
+  f=self.fixture
+  f.url=t.HOME;f.meta=f.put('meta.json',{'tabId':11,'windowId':22,'url':t.HOME,'active':True})
+  result=f.run_inspect();initial=Path(result['inspection'])
+  inspected=m.check_pointer(m.pointer(initial));self.root=initial.parent
+  search=dict(inspected,initial_inspection=m.pointer(initial))
+  search['capture']=m.evidence(self.root/'actual-search.json',f.capture)
+  search_ref=m.evidence(self.root/'search-inspection.json',search)
+  note={'uid':f.uid,'url':'https://www.xiaohongshu.com/explore/'+'3'*24,
+        'title':'Synthetic diary','body':'Synthetic treatment narrative.',
+        'authors':[{'name':'synthetic-author','url':'https://www.xiaohongshu.com/user/profile/'+'5'*24}]}
+  capture=m.evidence(self.root/'normal-note.json',note)
+  b=copy.deepcopy(inspected['binding']);b['tabs']['detail']['last_url']=note['url'];b['tabs']['search']=b['tabs']['detail']
+  probe={'kind':m.KIND,'binding':b,'inspection':search_ref,'capture':capture,
+         'excluded_note_id':'2'*24,'collection_permitted':False}
+  probe_file=self.root/'note-probe.json';m.evidence(probe_file,probe)
+  review={'reader':'codex','reviewed':True,'body_read':True,'capture_sha256':capture['sha256'],
+          'summary':'Read the synthetic title, body and author only.',
+          'positions':['/title','/body','/authors'],'comments_read':False,'media_read':False}
+  review_file=f.put('synthetic-review.json',review)
+  with f.mocks():self.result=m.attest(probe_file,review_file,'historical')
+  self.binding=t.bridge.load_binding(f.p,'historical')
+  self.record=f.put('preparation.json',{'project':str(f.p)})
+  m.evidence(self.record.with_suffix('.done.json'),{'inspection':m.pointer(initial),'collection_permitted':False})
+  self.grant=m.check_pointer(self.result['grant'])
+
+ def check(self,stops=None):
+  with patch.object(m.nr,'current_stops',return_value=self.fixture.stops if stops is None else stops):
+   return t.completed_preparation(self.record,['k'])
+
+ def write_binding(self,b):
+  t.bridge.save_binding(self.fixture.p,'historical',b)
+
+ def replace_grant(self,grant):
+  # Deliberately construct internally rehashed corrupt fixtures; validators
+  # must reject invalid semantics, not merely fail a stale outer checksum.
+  p=Path(self.result['grant']['file']);p.write_text(json.dumps(grant))
+  b=copy.deepcopy(self.binding);b['manual_tab_revalidation']=m.pointer(p)
+  self.write_binding(b)
+
+ def test_old_code_can_prove_completion_but_cannot_grant_current_access(self):
+  changed={**m.code_fingerprint(),'xhs_bridge_driver.mjs':'0'*64}
+  with patch.object(m,'code_fingerprint',return_value=changed):
+   self.check()
+   with patch.object(m.nr,'current_stops',return_value=self.fixture.stops),self.assertRaisesRegex(Exception,'MANUAL_VALIDATOR_CHANGED'):
+    m.web_exceptions(self.fixture.p,self.binding,['k'])
+
+ def test_stale_current_parent_still_prevents_creating_a_tab(self):
+  changed={**m.code_fingerprint(),'xhs_bridge_driver.mjs':'0'*64}
+  @contextlib.contextmanager
+  def lease(project,b):
+   m.web_exceptions(project,b,['k'])
+   yield ['k']
+  creator_calls=[]
+  with patch.object(m,'code_fingerprint',return_value=changed),patch.object(m.nr,'current_stops',return_value=self.fixture.stops),patch.object(t.bridge,'lease',lease),self.assertRaisesRegex(Exception,'MANUAL_VALIDATOR_CHANGED'):
+   t.prepare(self.fixture.p/'new',self.fixture.p,'historical','Synthetic authorized task.',lambda *a:creator_calls.append(a))
+  self.assertEqual(creator_calls,[])
+
+ def test_changed_current_stops_still_reject_historical_completion(self):
+  changed={'k':dict(self.fixture.stops['k'],sha256='f'*64)}
+  with self.assertRaisesRegex(Exception,'MANUAL_STOP_CHANGED'):self.check(changed)
+
+ def test_changed_binding_account_is_rejected(self):
+  b=copy.deepcopy(self.binding);b['account_uid']='8'*24;self.write_binding(b)
+  with self.assertRaisesRegex(Exception,'MANUAL_AUTHORITY_CHANGED'):self.check()
+
+ def test_changed_binding_project_is_rejected(self):
+  b=copy.deepcopy(self.binding);b['project']=str(self.fixture.p/'wrong');self.write_binding(b)
+  with self.assertRaisesRegex(Exception,'BINDING_NOT_FOUND'):self.check()
+
+ def test_changed_binding_page_is_rejected(self):
+  b=copy.deepcopy(self.binding);b['tabs']['detail']['page']='B'*32;self.write_binding(b)
+  with self.assertRaisesRegex(Exception,'PROJECT_TAB_ATTESTATION_TARGET_CHANGED'):self.check()
+
+ def test_changed_initial_inspection_hash_is_rejected(self):
+  done=json.loads(self.record.with_suffix('.done.json').read_text())
+  Path(done['inspection']['file']).write_text('{}')
+  with self.assertRaises(Exception):self.check()
+
+ def test_changed_search_capture_hash_is_rejected(self):
+  probe=m.check_pointer(self.grant['probe']);search=m.check_pointer(probe['inspection'])
+  Path(search['capture']['file']).write_text('{}')
+  with self.assertRaises(Exception):self.check()
+
+ def test_changed_note_capture_hash_is_rejected(self):
+  probe=m.check_pointer(self.grant['probe']);Path(probe['capture']['file']).write_text('{}')
+  with self.assertRaises(Exception):self.check()
+
+ def test_changed_review_hash_is_rejected(self):
+  Path(self.grant['review']['file']).write_text('{}')
+  with self.assertRaises(Exception):self.check()
+
+ def test_changed_frozen_stop_hash_is_rejected(self):
+  probe=m.check_pointer(self.grant['probe']);search=m.check_pointer(probe['inspection']);attempt=m.check_pointer(search['attempt'])
+  Path(next(iter(attempt['frozen_stops'].values()))['file']).write_text('{}')
+  with self.assertRaises(Exception):self.check()
+
+ def test_incomplete_review_rejected_even_with_updated_hashes(self):
+  review=m.check_pointer(self.grant['review']);review['body_read']=False
+  p=self.root/'incomplete-review.json';m.evidence(p,review)
+  g=copy.deepcopy(self.grant);g['review']=m.pointer(p);self.replace_grant(g)
+  with self.assertRaisesRegex(Exception,'MANUAL_ACTUAL_CODEX_REVIEW_REQUIRED'):self.check()
+
+ def test_changed_scope_rejected_even_with_updated_hashes(self):
+  g=copy.deepcopy(self.grant);g['scope']='all_channels';self.replace_grant(g)
+  with self.assertRaisesRegex(Exception,'MANUAL_GRANT_SCOPE_CHANGED'):self.check()
+
+ def test_missing_fingerprint_is_not_a_historical_attestation(self):
+  g=copy.deepcopy(self.grant);del g['code_fingerprint'];self.replace_grant(g)
+  with self.assertRaisesRegex(Exception,'PROJECT_TAB_HISTORICAL_FINGERPRINT_INVALID'):self.check()
+
+ def test_malformed_fingerprint_is_not_a_historical_attestation(self):
+  g=copy.deepcopy(self.grant);g['code_fingerprint']['xhs_bridge_driver.mjs']='not-a-hash';self.replace_grant(g)
+  with self.assertRaisesRegex(Exception,'PROJECT_TAB_HISTORICAL_FINGERPRINT_INVALID'):self.check()
+
+ def test_unobserved_note_rejected_even_with_updated_hashes(self):
+  probe=m.check_pointer(self.grant['probe']);note=m.check_pointer(probe['capture'])
+  note['url']='https://www.xiaohongshu.com/explore/'+'6'*24
+  p=self.root/'unobserved-note.json';m.evidence(p,note);probe['capture']=m.pointer(p)
+  probe_path=self.root/'unobserved-probe.json';m.evidence(probe_path,probe)
+  g=copy.deepcopy(self.grant);g['probe']=m.pointer(probe_path);self.replace_grant(g)
+  with self.assertRaisesRegex(Exception,'MANUAL_NOTE_NOT_IN_SEARCH'):self.check()
+
+ def test_modified_search_account_rejected_even_with_updated_hashes(self):
+  probe=m.check_pointer(self.grant['probe']);search=m.check_pointer(probe['inspection']);capture=m.check_pointer(search['capture'])
+  capture['uid']='7'*24
+  capture_path=self.root/'wrong-account-search.json';m.evidence(capture_path,capture);search['capture']=m.pointer(capture_path)
+  search_path=self.root/'wrong-account-inspection.json';m.evidence(search_path,search);probe['inspection']=m.pointer(search_path)
+  probe_path=self.root/'wrong-account-probe.json';m.evidence(probe_path,probe)
+  g=copy.deepcopy(self.grant);g['probe']=m.pointer(probe_path);self.replace_grant(g)
+  with self.assertRaises(Exception):self.check()
+
+ def test_wrong_initial_inspection_chain_rejected_even_with_updated_hashes(self):
+  probe=m.check_pointer(self.grant['probe']);search=m.check_pointer(probe['inspection'])
+  original=m.check_pointer(search['initial_inspection']);duplicate=self.root/'different-initial.json';m.evidence(duplicate,original)
+  search['initial_inspection']=m.pointer(duplicate)
+  search_file=self.root/'different-search.json';m.evidence(search_file,search)
+  probe['inspection']=m.pointer(search_file)
+  probe_file=self.root/'different-probe.json';m.evidence(probe_file,probe)
+  g=copy.deepcopy(self.grant);g['probe']=m.pointer(probe_file);self.replace_grant(g)
+  with self.assertRaisesRegex(Exception,'PROJECT_TAB_INSPECTION_CHANGED'):self.check()
 
 if __name__=='__main__':unittest.main()
