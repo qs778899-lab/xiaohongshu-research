@@ -142,6 +142,58 @@ class ManualTabTests(unittest.TestCase):
         with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'IDENTITY_CHANGED'):m.finish_inspection(f)
         self.assertFalse((f.parent/'inspection.json').exists())
 
+    def second_focus_failure(self):
+        f=self.failed_focus_fixture();self.adopt_error='USER_TAB_NOT_FOCUSED'
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'USER_TAB_NOT_FOCUSED'):m.finish_inspection(f)
+        self.adopt_error=None
+        return f
+
+    def test_verified_focus_checks_live_metadata_and_preserves_failures(self):
+        f=self.second_focus_failure()
+        saved={name:(f.parent/name).read_bytes() for name in ['attempt.json','inspection-failure.json','finish-inspection-attempt.json','finish-inspection-failure.json']}
+        with self.mocks():result=m.finish_inspection(f,verify_focus=True)
+        self.assertFalse(result['collection_permitted'])
+        self.assertEqual(self.calls[-4:],['active_user_tab','adopt_user_tab','identity','capture'])
+        for name,data in saved.items():self.assertEqual((f.parent/name).read_bytes(),data)
+
+    def test_verified_focus_rejects_unknown_outcome_and_access_errors(self):
+        f=self.second_focus_failure();before=list(self.calls)
+        for error in ['ACCESS_STOP','COMMAND_OUTCOME_UNKNOWN','USER_TAB_CHANGED','USER_TAB_BIND_MISMATCH']:
+            (f.parent/'finish-inspection-failure.json').write_text(json.dumps({'error':error}))
+            with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'PREBIND_FOCUS'):m.finish_inspection(f,True)
+        self.assertEqual(self.calls,before)
+
+    def test_verified_focus_rejects_different_active_tab_before_adoption(self):
+        f=self.second_focus_failure();self.url='https://www.xiaohongshu.com/explore'
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'FOCUSED_TARGET_CHANGED'):m.finish_inspection(f,True)
+        self.assertEqual(self.calls[-1],'active_user_tab')
+        self.assertFalse((f.parent/'verified-focus-attempt.json').exists())
+
+    def test_failed_preflight_does_not_hide_later_unknown_binding_outcome(self):
+        f=self.second_focus_failure();original_url=self.url;self.url='https://www.xiaohongshu.com/explore'
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'FOCUSED_TARGET_CHANGED'):m.finish_inspection(f,True)
+        self.assertFalse((f.parent/'verified-focus-failure.json').exists())
+        self.assertEqual(len(list((f.parent/'focus-diagnostics').glob('*.json'))),1)
+        self.url=original_url;self.adopt_error='COMMAND_OUTCOME_UNKNOWN'
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'COMMAND_OUTCOME_UNKNOWN'):m.finish_inspection(f,True)
+        self.assertEqual(json.loads((f.parent/'verified-focus-failure.json').read_text())['error'],'COMMAND_OUTCOME_UNKNOWN')
+        before=list(self.calls)
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'ALREADY_ATTEMPTED'):m.finish_inspection(f,True)
+        self.assertEqual(before,self.calls)
+
+    def test_verified_focus_marker_cannot_be_reused_after_failure(self):
+        f=self.second_focus_failure();self.adopt_error='USER_TAB_NOT_FOCUSED'
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'USER_TAB_NOT_FOCUSED'):m.finish_inspection(f,True)
+        before=list(self.calls)
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'ALREADY_ATTEMPTED'):m.finish_inspection(f,True)
+        self.assertEqual(self.calls,before)
+
+    def test_verified_focus_rejects_changed_previous_attempt(self):
+        f=self.second_focus_failure();v=json.loads((f.parent/'finish-inspection-attempt.json').read_text())
+        v['attempt']['sha256']='tampered';(f.parent/'finish-inspection-attempt.json').write_text(json.dumps(v))
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'ATTEMPT_CHANGED'):m.finish_inspection(f,True)
+        self.assertEqual(self.calls,['adopt_user_tab','adopt_user_tab'])
+
     def test_cross_project_inherits_prior_exclusions_in_new_grant(self):
         self.parent['manual_excluded_note_ids']=['7'*24]
         destination=self.p/'separate-project'

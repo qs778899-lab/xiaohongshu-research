@@ -140,7 +140,7 @@ def inspect(project,parent_name,metadata_file,user_file,parent_project=None):
             raise
         finally:driver.close()
 
-def finish_inspection(attempt_file):
+def finish_inspection(attempt_file, verify_focus=False):
     """One continuation after a proven pre-bind focus failure; no unknown retries."""
     attempt_file=Path(attempt_file).resolve();attempt,_=nr.read_json(attempt_file)
     root=attempt_file.parent
@@ -148,7 +148,19 @@ def finish_inspection(attempt_file):
     nr.require(failure.get('error')=='USER_TAB_NOT_FOCUSED','MANUAL_PREBIND_FOCUS_FAILURE_REQUIRED')
     nr.require(not any((root/name).exists() for name in ('adopted.json','identity.json','loaded-page.json','inspection.json')),
                'MANUAL_INSPECTION_MAY_HAVE_PROGRESS')
-    nr.require(not (root/'finish-inspection-attempt.json').exists(),'MANUAL_FINISH_INSPECTION_ALREADY_ATTEMPTED')
+    marker='finish-inspection-attempt.json'
+    failure_name='finish-inspection-failure.json'
+    previous=None
+    if verify_focus:
+        previous=pointer(root/marker)
+        prior=check_pointer(previous)
+        nr.require(prior.get('attempt')==pointer(attempt_file)
+                   and prior.get('failure')==pointer(root/'inspection-failure.json'),'MANUAL_ATTEMPT_CHANGED')
+        prior_failure,_=nr.read_json(root/failure_name)
+        nr.require(prior_failure.get('error')=='USER_TAB_NOT_FOCUSED','MANUAL_PREBIND_FOCUS_FAILURE_REQUIRED')
+        marker='verified-focus-attempt.json'
+        failure_name='verified-focus-failure.json'
+    nr.require(not (root/marker).exists(),'MANUAL_FINISH_INSPECTION_ALREADY_ATTEMPTED')
     project=Path(attempt['project']).resolve();xp.legacy.research_path(project)
     nr.require(root.parent==project/'bridge'/'manual-tab-recoveries','MANUAL_PROJECT_CHANGED')
     parent=check_pointer(attempt['parent']);metadata=check_pointer(attempt['metadata']);user=check_pointer(attempt['user'])
@@ -181,11 +193,20 @@ def finish_inspection(attempt_file):
     b=attempt['candidate'];target=attempt['target'];args=attempt['args']
     with nr.locked_stops(parent['profile_guard_key'],parent['account_uid']) as keys:
         nr.require(nr.current_stops(keys)==attempt['stops'],'MANUAL_STOP_CHANGED')
-        # Exclusive write consumes the sole continuation before any browser operation.
-        with (root/'finish-inspection-attempt.json').open('x') as f:
-            json.dump({'at':xp.legacy.now(),'attempt':pointer(attempt_file),'failure':pointer(root/'inspection-failure.json')},f)
         driver=bridge.Driver(b['runtime'])
         try:
+            focus=None
+            if verify_focus:
+                # Metadata only; a failed check cannot bind or navigate any page.
+                focus=driver.call('active_user_tab',b)
+                nr.require(all(focus.get(k)==target[k] for k in ('tabId','windowId','url','active')),
+                           'MANUAL_FOCUSED_TARGET_CHANGED')
+                nr.require(nr.current_stops(keys)==attempt['stops'],'MANUAL_STOP_CHANGED')
+            # Exclusive marker is written before the original adoption call, including its focus recheck.
+            with (root/marker).open('x') as f:
+                json.dump({'at':xp.legacy.now(),'attempt':pointer(attempt_file),
+                           'failure':pointer(root/'inspection-failure.json'),
+                           'previous':previous,'focus_metadata':focus},f)
             # The original driver still enforces exact tab, URL, active/focused window and pinned versions.
             adopted=driver.call('adopt_user_tab',b,chromeTabId=target['tabId'],windowId=target['windowId'],expectedUrl=target['url'])
             evidence(root/'adopted.json',adopted)
@@ -198,11 +219,17 @@ def finish_inspection(attempt_file):
             nr.require(bridge.load_binding(source_project,parent['binding_name'])==parent,'MANUAL_PARENT_CHANGED')
             result={'kind':KIND,'at':xp.legacy.now(),'attempt':pointer(attempt_file),'binding':b,
                     'capture':capture_ref,'collection_permitted':False,'original_binding_unchanged':True,
-                    'finish_inspection':pointer(root/'finish-inspection-attempt.json')}
+                    'finish_inspection':pointer(root/marker)}
             evidence(root/'inspection.json',result)
             return {'inspection':str(root/'inspection.json'),'capture':capture_ref,'collection_permitted':False}
         except Exception as exc:
-            evidence(root/'finish-inspection-failure.json',{'at':xp.legacy.now(),'error':str(exc),'collection_permitted':False})
+            failure_data={'at':xp.legacy.now(),'error':str(exc),'collection_permitted':False}
+            if verify_focus and not (root/marker).exists():
+                # Read-only diagnostics must not occupy the final adoption outcome file.
+                diagnostic=root/'focus-diagnostics'/(xp.digest(failure_data)+'.json')
+                evidence(diagnostic,failure_data)
+            else:
+                evidence(root/failure_name,failure_data)
             raise
         finally:driver.close()
 
@@ -522,7 +549,7 @@ def main():
     s.add_argument('--parent-project',type=Path)
     s=sub.add_parser('inspect-active');s.add_argument('--project',type=Path,required=True);s.add_argument('--binding',required=True);s.add_argument('--user',type=Path,required=True)
     s.add_argument('--parent-project',type=Path)
-    s=sub.add_parser('finish-inspection');s.add_argument('--attempt',type=Path,required=True)
+    s=sub.add_parser('finish-inspection');s.add_argument('--attempt',type=Path,required=True);s.add_argument('--verify-focus',action='store_true')
     s=sub.add_parser('probe-note');s.add_argument('--inspection',type=Path,required=True);s.add_argument('--url',required=True)
     s=sub.add_parser('probe-search');s.add_argument('--inspection',type=Path,required=True);s.add_argument('--task',required=True)
     s=sub.add_parser('finish-search');s.add_argument('--inspection',type=Path,required=True)
@@ -532,7 +559,7 @@ def main():
     a=p.parse_args()
     if a.command=='inspect':result=inspect(a.project,a.binding,a.metadata,a.user,a.parent_project)
     elif a.command=='inspect-active':result=inspect_active(a.project,a.binding,a.user,a.parent_project)
-    elif a.command=='finish-inspection':result=finish_inspection(a.attempt)
+    elif a.command=='finish-inspection':result=finish_inspection(a.attempt,a.verify_focus)
     elif a.command=='probe-search':result=probe_search(a.inspection,a.task)
     elif a.command=='finish-search':result=finish_search(a.inspection)
     elif a.command=='finish-note':result=finish_note(a.inspection)
