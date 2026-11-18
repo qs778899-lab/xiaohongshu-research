@@ -236,18 +236,21 @@ def read_tasks(project):
 
 
 def coverage(cfg, config_path, project):
+    from xhs_rounds import discovery_entities
     bundle = plan(cfg, config_path); tasks = read_tasks(project)
     entities = {e['id']: e['name'] for e in cfg['entities']}
     planned = {(key(u['target']), u['sort']): u for u in bundle['manifest']['units']}
     routes, byhash, peers = {}, defaultdict(set), defaultdict(set)
     for t in tasks:
         d = t['payload']; target = d.get('target', ''); ids = set()
+        explicit = discovery_entities(d)
+        if explicit is not None:
+            ids.update(eid for eid, label in explicit.items()
+                       if eid in entities and label == entities[eid])
         if d.get('stage') == 'search':
             q = planned.get((key(target), d.get('sort')))
             if q: ids.update(q['discovery_entity_ids'])
-            for eid in d.get('discovery_entity_ids', []):
-                if eid in entities and d.get('discovery_entity_labels', {}).get(eid) == entities[eid]: ids.add(eid)
-            if not d.get('discovery_entity_ids'):
+            if explicit is None:
                 ids.update(eid for eid, name in entities.items() if name in target)
         routes[t['id']] = ids
         # A search string equal to an ID must not make unrelated body/author peers.

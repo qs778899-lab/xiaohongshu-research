@@ -186,6 +186,41 @@ class PeopleTests(unittest.TestCase):
         self.assertEqual(len(d), 1); self.assertEqual(d[0]['coverage_state'], 'pending')
         self.assertTrue(c['discovery_is_not_attribution']); self.assertIsNone(c['entities'][0]['attributable_evaluation_count'])
 
+    def test_explicit_body_and_media_routes_without_local_search_parent(self):
+        p = xp.Project(self.project)
+        for stage, target in [('body', 'a' * 24), ('images', 'b' * 24)]:
+            p.add_task('native', stage + '-key', {'stage': stage, 'target': target,
+                       'provenance': [{'sha256': 'external-project-source'}],
+                       'discovery_entity_ids': ['person-a'],
+                       'discovery_entity_labels': {'person-a': '示例甲'}}, 30)
+        p.db.commit(); p.close()
+        before = self.states(); c = people.coverage(self.cfg, self.source, self.project)
+        downstream = c['entities'][0]['downstream']
+        self.assertEqual({d['stage'] for d in downstream}, {'body', 'images'})
+        self.assertTrue(all(d['coverage_state'] == 'pending' for d in downstream))
+        self.assertTrue(all(d['discovery_entity_ids'] == ['person-a'] for d in downstream))
+        self.assertTrue(all(d['verified_source_count'] == 0 for d in downstream))
+        self.assertTrue(c['discovery_is_not_attribution'])
+        self.assertIsNone(c['entities'][0]['attributable_evaluation_count'])
+        self.assertEqual(self.states(), before)
+
+    def test_invalid_explicit_downstream_metadata_is_not_silently_ignored(self):
+        p = xp.Project(self.project)
+        p.add_task('native', 'invalid-body-key', {'stage': 'body', 'target': 'a' * 24,
+                   'discovery_entity_ids': ['person-a']}, 30)
+        p.db.commit(); p.close()
+        before = self.states()
+        with self.assertRaisesRegex(ValueError, 'Explicit discovery'):
+            people.coverage(self.cfg, self.source, self.project)
+        self.assertEqual(self.states(), before)
+
+    def test_fullname_fallback_never_routes_unrelated_nonsearch_targets(self):
+        p = xp.Project(self.project)
+        p.add_task('native', 'legacy-identity-key', {'stage': 'identity', 'target': '示例甲'}, 30)
+        p.db.commit(); p.close()
+        c = people.coverage(self.cfg, self.source, self.project)
+        self.assertEqual(c['entities'][0]['downstream'], [])
+
     def test_plan_can_import_through_existing_manifest_without_marking_read(self):
         b = self.plan(); m = self.base / 'manifest.json'; m.write_text(json.dumps(b['manifest']))
         p = xp.Project(self.project)
