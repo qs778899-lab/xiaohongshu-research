@@ -181,3 +181,5 @@ scripts/xhs_people.py
 scripts/test_people.py
 scripts/test_person_routes.py
 scripts/test_manual_search_confirmation.py
+scripts/xhs_manual_home_return.py
+scripts/test_manual_home_return.py

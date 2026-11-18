@@ -61,6 +61,10 @@ CDP 元数据有时不返回 Chrome 窗口编号，不能用空值覆盖先前�
 
 对于非预期回首页，先记录实际URL和点击时点，不能仅凭跳转就认定有人操作。静置观察及普通评论批次未复现故障时可报告恢复后的真实进展，同时保留原因未确定和旧现场；不得宣称已经修好未知原因。
 
+已有自主返回授权、原手动绑定的网页凭据仍有效，且搜索在新导航前只做一次元数据核验即因 `UNEXPECTED_TARGET_CHANGE` 停止时，可用 `xhs_manual_home_return.py --project P --binding B return --task SEARCH_TASK --metadata META --failure-log LOG --authorization "实际既有授权依据"`。只接收精确普通首页 `https://www.xiaohongshu.com/explore`，不接收 `source=404`、验证码、其他页面或未决导航；返回目标必须是原 `last_url` 的同账号正常正文归档。核对同一 CDP、原生标签、窗口、账号及 STOP 后只导航一次，原绑定、失败日志、任务断点和消费记录均保存。
+
+返回后捕获正文，绑定仍为 blocked。Codex 实际读完标题、正文和作者后，以现有回执格式执行 `xhs_manual_home_return.py --project P --binding B attest --probe PROBE --review REVIEW`；再核对当前原页后仅恢复原绑定 ready，不签发新凭据、不完成研究任务、不解除 STOP。未知结果不重放导航；新的访问限制更新共享 STOP 并使旧凭据失效。此入口不改变 404 恢复语义或原凭据代码指纹。
+
 ## 自主建立新专项标签
 
 已有持续开页授权且原项目网页绑定仍有效时，可运行 `xhs_project_tab.py --project NEW --parent-project OLD --binding ORIGINAL --authorization "实际授权依据"`。它在原配置与精确登记窗口中创建一个固定小红书首页，保留旧标签；先复核原账号及全部 STOP，再对新页执行首页 inspect。随后仍运行 `probe-search / probe-note / attest`，实际读完新搜索和正文才建立新项目绑定。
