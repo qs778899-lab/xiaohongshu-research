@@ -180,3 +180,4 @@ references/person-search.md
 scripts/xhs_people.py
 scripts/test_people.py
 scripts/test_person_routes.py
+scripts/test_manual_search_confirmation.py

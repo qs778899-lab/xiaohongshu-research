@@ -383,6 +383,146 @@ def finish_search(inspection_file):
             return {'inspection':str(root/'search-probe.json'),'capture':capture_ref,'collection_permitted':False}
         finally:driver.close()
 
+def verified_search_context(inspection_file, user, refs=None):
+    """Validate the original captcha failure and a later, exact-scope user reply."""
+    inspection_file=Path(inspection_file).resolve();root=inspection_file.parent
+    inspected,_=nr.read_json(inspection_file)
+    attempt=check_pointer(inspected['attempt']);parent=check_pointer(attempt['parent'])
+    b=inspected['binding'];project=Path(attempt['project']).resolve()
+    expected=xp.digest({'stops':attempt['stops'],'context':parent['context_id'],'tabId':attempt['target']['tabId']})
+    nr.require(root==project/'bridge/manual-tab-recoveries'/expected and inspection_file.name=='inspection.json',
+               'MANUAL_ATTEMPT_LOCATION_CHANGED')
+    nr.require(inspected['attempt']==pointer(root/'attempt.json'),'MANUAL_ATTEMPT_CHANGED')
+    nr.require(inspected.get('kind')==KIND and b.get('project')==str(project)
+               and b.get('manual_single_tab') is True and b.get('transport_surface')=='browser',
+               'MANUAL_ATTEMPT_CHANGED')
+    for field in ('context_id','account_uid','profile_guard_key','profile_label','runtime'):
+        nr.require(b.get(field)==parent.get(field),'MANUAL_PARENT_IDENTITY_CHANGED')
+    nr.require(set(b.get('tabs',{}))=={'search','detail'} and b['tabs']['search']==b['tabs']['detail'],
+               'MANUAL_PAGE_CHANGED')
+    slot=b['tabs']['detail'];target=attempt['target']
+    nr.require(slot.get('chrome_tab_id')==target['tabId'] and slot.get('window_id')==target['windowId']
+               and slot.get('owned') is False,'MANUAL_PAGE_CHANGED')
+    adopted,_=nr.read_json(root/'adopted.json')
+    nr.require(slot.get('page')==adopted.get('page') and bool(slot.get('page')),'MANUAL_PAGE_CHANGED')
+    candidate=json.loads(json.dumps(attempt['candidate']))
+    for candidate_slot in candidate['tabs'].values():candidate_slot['page']=adopted['page']
+    nr.require(authority(b)==authority(candidate),'MANUAL_AUTHORITY_CHANGED')
+    reserved=check_pointer(attempt['account_attempt'])
+    reservation=(xp.legacy.account_root()/'manual-tab-attempts'/(expected+'.json')).resolve()
+    nr.require(Path(attempt['account_attempt']['file']).resolve()==reservation
+               and reserved.get('project')==str(project) and reserved.get('context_id')==b['context_id']
+               and reserved.get('tab_id')==target['tabId'] and reserved.get('stops')==attempt['stops']
+               and reserved.get('parent_project')==attempt.get('parent_project',attempt['project']),
+               'MANUAL_ATTEMPT_RESERVATION_CHANGED')
+    loaded=check_pointer(inspected['capture']);args=proof_args(loaded['url'])
+    nr.require(args['stage']=='home','MANUAL_HOME_INSPECTION_REQUIRED');require_capture(loaded,b,args)
+    names={'failure':'search-failure.json','navigation':'search-navigation.json',
+           'previous_metadata':'search-metadata-0.json','search_attempt':'search-attempt.json'}
+    actual_refs={key:pointer(root/name) for key,name in names.items()}
+    nr.require(refs is None or refs==actual_refs,'MANUAL_SEARCH_HISTORY_CHANGED')
+    nr.require(user.get('history')==actual_refs,'MANUAL_CONFIRMATION_HISTORY_CHANGED')
+    saved={key:check_pointer(ref) for key,ref in actual_refs.items()}
+    failure,nav,previous,started=(saved[k] for k in ('failure','navigation','previous_metadata','search_attempt'))
+    nr.require(failure.get('error')=='ACCESS_STOP' and nav.get('navigationSubmitted') is True,
+               'MANUAL_VERIFIED_SEARCH_NOT_APPLICABLE')
+    nr.require(started.get('inspection')==pointer(inspection_file)
+               and started.get('scope')=='one_existing_query_health_check_only','MANUAL_SEARCH_HISTORY_CHANGED')
+    args=proof_args(started['url']);nr.require(args['stage']=='search','MANUAL_ACTUAL_SEARCH_REQUIRED')
+    db=nr.native.open_lookup_project(project)
+    try:task=db.db.execute('SELECT kind,payload FROM tasks WHERE id=?',(started.get('task'),)).fetchone()
+    finally:db.close()
+    nr.require(task and task['kind']=='native','EXISTING_SEARCH_TASK_REQUIRED')
+    payload=json.loads(task['payload'])
+    nr.require(payload.get('stage')=='search' and payload.get('target')==args['query'],
+               'MANUAL_SEARCH_TASK_CHANGED')
+    parsed=urlparse(previous.get('url',''));redirects=parse_qs(parsed.query,keep_blank_values=True).get('redirectPath',[])
+    nr.require(parsed.scheme=='https' and parsed.netloc=='www.xiaohongshu.com'
+               and parsed.path=='/website-login/captcha' and not parsed.fragment and len(redirects)==1,
+               'MANUAL_SEARCH_CAPTCHA_REDIRECT_REQUIRED')
+    nr.require(proof_args(redirects[0])==args and previous.get('page')==slot['page'],
+               'MANUAL_SEARCH_CAPTCHA_TARGET_CHANGED')
+    nr.require(isinstance(user,dict) and isinstance(user.get('user_statement'),str)
+               and user['user_statement'].strip() and isinstance(user.get('normal_other_posts_statement'),str)
+               and user['normal_other_posts_statement'].strip(),'MANUAL_USER_RESTORATION_REQUIRED')
+    nr.require(user.get('inspection')==pointer(inspection_file) and user.get('account_uid')==b['account_uid']
+               and user.get('context_id')==b['context_id'] and user.get('tab_id')==slot['chrome_tab_id']
+               and user.get('page')==slot['page'],'MANUAL_CONFIRMATION_SCOPE_CHANGED')
+    when=nr.stamp(user.get('processed_at'))
+    nr.require(when>nr.stamp(started.get('at')) and when>nr.stamp(failure.get('at'))
+               and all(when>nr.stamp(s['at']) for s in attempt['stops'].values()),
+               'MANUAL_CONFIRMATION_PREDATES_FAILURE')
+    for ref in attempt['frozen_stops'].values():check_pointer(ref)
+    return inspected,attempt,args,actual_refs
+
+def resume_verified_search(inspection_file,user_file):
+    """One read of a user-confirmed search after captcha; no navigation or solving."""
+    user,_=nr.read_json(user_file)
+    inspected,attempt,args,refs=verified_search_context(inspection_file,user)
+    root=Path(inspection_file).resolve().parent;b=inspected['binding']
+    marker=root/'verified-search-continuation.json';parent=check_pointer(attempt['parent'])
+    source_project=Path(attempt.get('parent_project',attempt['project']))
+    with nr.locked_stops(b['profile_guard_key'],b['account_uid']) as keys:
+        nr.require(nr.current_stops(keys)==attempt['stops'],'MANUAL_STOP_CHANGED')
+        nr.require(bridge.load_binding(source_project,parent['binding_name'])==parent,'MANUAL_PARENT_CHANGED')
+        nr.require(not marker.exists() and not (root/'search-probe.json').exists(),
+                   'MANUAL_VERIFIED_SEARCH_ALREADY_ATTEMPTED')
+        user_ref=evidence(root/'verified-search-user.json',user)
+        continuation=evidence(marker,{'kind':'user_verified_same_search_read_v1','at':xp.legacy.now(),
+            'inspection':pointer(inspection_file),'user':user_ref,'history':refs,
+            'navigation':False,'scope':'current_exact_search_after_explicit_user_verification'})
+        driver=bridge.Driver(b['runtime'])
+        try:
+            meta=driver.call('metadata',b,'detail');meta_ref=evidence(root/'verified-search-metadata.json',meta)
+            bridge.safe_url(meta.get('url',''))
+            nr.require(meta.get('page')==b['tabs']['detail']['page'] and proof_args(meta.get('url',''))==args,
+                       'MANUAL_PAGE_CHANGED')
+            ident=driver.call('identity',b,'detail');ident_ref=evidence(root/'verified-search-identity.json',ident)
+            bridge.safe_url(ident.get('url',''))
+            nr.require(ident.get('page')==b['tabs']['detail']['page']
+                       and ident.get('uid')==b['account_uid'] and proof_args(ident.get('url',''))==args,
+                       'MANUAL_IDENTITY_CHANGED')
+            captured=driver.call('capture',b,'detail',**args)
+            capture_ref=evidence(root/'verified-search-capture.json',captured)
+            bridge.safe_url(captured.get('url',''));require_capture(captured,b,args)
+            nr.require(nr.current_stops(keys)==attempt['stops'],'MANUAL_STOP_CHANGED')
+            nr.require(bridge.load_binding(source_project,parent['binding_name'])==parent,'MANUAL_PARENT_CHANGED')
+            b['tabs']['detail']['last_url']=captured['url'];b['tabs']['search']=b['tabs']['detail']
+            started=check_pointer(refs['search_attempt'])
+            result=dict(inspected,binding=b,capture=capture_ref,initial_inspection=pointer(inspection_file),
+                search_task=started['task'],at=xp.legacy.now(),verified_search_continuation=continuation,
+                verified_search_metadata=meta_ref,verified_search_identity=ident_ref)
+            evidence(root/'search-probe.json',result)
+            return {'inspection':str(root/'search-probe.json'),'capture':capture_ref,'collection_permitted':False}
+        except Exception as exc:
+            evidence(root/'verified-search-failure.json',{'at':xp.legacy.now(),'error':str(exc),'collection_permitted':False})
+            if getattr(exc,'code',None)=='ACCESS_STOP':nr.identity.stop_all(keys,nr.STOP_REASON)
+            raise
+        finally:driver.close()
+
+def validate_verified_search(inspected):
+    """Keep the user's later confirmation and original failed attempt in the grant chain."""
+    ref=inspected['verified_search_continuation'];record=check_pointer(ref)
+    initial_ref=inspected['initial_inspection'];root=Path(initial_ref['file']).parent
+    nr.require(ref==pointer(root/'verified-search-continuation.json')
+               and record.get('kind')=='user_verified_same_search_read_v1'
+               and record.get('inspection')==initial_ref and record.get('navigation') is False
+               and record.get('scope')=='current_exact_search_after_explicit_user_verification',
+               'MANUAL_VERIFIED_SEARCH_CHAIN_CHANGED')
+    nr.require(record.get('user')==pointer(root/'verified-search-user.json'),'MANUAL_CONFIRMATION_SCOPE_CHANGED')
+    initial,attempt,args,refs=verified_search_context(initial_ref['file'],check_pointer(record['user']),record['history'])
+    nr.require(authority(inspected['binding'])==authority(initial['binding']),'MANUAL_AUTHORITY_CHANGED')
+    for key,name in [('verified_search_metadata','verified-search-metadata.json'),
+                     ('verified_search_identity','verified-search-identity.json'),('capture','verified-search-capture.json')]:
+        nr.require(inspected.get(key)==pointer(root/name),'MANUAL_VERIFIED_SEARCH_CHAIN_CHANGED')
+    meta=check_pointer(inspected['verified_search_metadata']);ident=check_pointer(inspected['verified_search_identity'])
+    nr.require(meta.get('page')==initial['binding']['tabs']['detail']['page'] and proof_args(meta['url'])==args,
+               'MANUAL_PAGE_CHANGED')
+    nr.require(ident.get('page')==initial['binding']['tabs']['detail']['page']
+               and ident.get('uid')==initial['binding']['account_uid'] and proof_args(ident['url'])==args,
+               'MANUAL_IDENTITY_CHANGED')
+    require_capture(check_pointer(inspected['capture']),initial['binding'],args)
+
 def finish_note(inspection_file):
     """Validate already captured same-note content after a canonical URL change."""
     inspected,_=nr.read_json(inspection_file);root=Path(inspection_file).parent
@@ -422,6 +562,10 @@ def validated_probe(probe_ref):
     inspected=check_pointer(probe['inspection']);attempt=check_pointer(inspected['attempt'])
     initial=check_pointer(inspected['initial_inspection']) if inspected.get('initial_inspection') else inspected
     nr.require(initial['attempt']==inspected['attempt'],'MANUAL_ATTEMPT_CHANGED')
+    continuation_root=Path(inspected.get('initial_inspection',probe['inspection'])['file']).parent
+    if (continuation_root/'verified-search-continuation.json').exists() or inspected.get('verified_search_continuation'):
+        nr.require(bool(inspected.get('verified_search_continuation')),'MANUAL_VERIFIED_SEARCH_CHAIN_CHANGED')
+        validate_verified_search(inspected)
     user=check_pointer(attempt['user']);parent=check_pointer(attempt['parent'])
     if attempt.get('account_attempt'):
         reserved=check_pointer(attempt['account_attempt'])
@@ -553,6 +697,7 @@ def main():
     s=sub.add_parser('probe-note');s.add_argument('--inspection',type=Path,required=True);s.add_argument('--url',required=True)
     s=sub.add_parser('probe-search');s.add_argument('--inspection',type=Path,required=True);s.add_argument('--task',required=True)
     s=sub.add_parser('finish-search');s.add_argument('--inspection',type=Path,required=True)
+    s=sub.add_parser('resume-verified-search');s.add_argument('--inspection',type=Path,required=True);s.add_argument('--user',type=Path,required=True)
     s=sub.add_parser('finish-note');s.add_argument('--inspection',type=Path,required=True)
     s=sub.add_parser('attest');s.add_argument('--probe',type=Path,required=True);s.add_argument('--review',type=Path,required=True);s.add_argument('--binding',required=True)
     s=sub.add_parser('recheck');s.add_argument('--project',type=Path,required=True);s.add_argument('--binding',required=True)
@@ -562,6 +707,7 @@ def main():
     elif a.command=='finish-inspection':result=finish_inspection(a.attempt,a.verify_focus)
     elif a.command=='probe-search':result=probe_search(a.inspection,a.task)
     elif a.command=='finish-search':result=finish_search(a.inspection)
+    elif a.command=='resume-verified-search':result=resume_verified_search(a.inspection,a.user)
     elif a.command=='finish-note':result=finish_note(a.inspection)
     elif a.command=='attest':result=attest(a.probe,a.review,a.binding)
     elif a.command=='recheck':result=recheck(a.project,a.binding)
