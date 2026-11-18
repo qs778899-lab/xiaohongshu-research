@@ -43,10 +43,14 @@ def compile_terms(terms):
         word = normalized(term['text'])[0]
         mode = term.get('mode', 'literal')
         if mode == 'initials':
-            word = re.sub(r'[\s.·]+', '', word)
+            word = re.sub(r'[\s.·_-]+', '', word)
             if not re.fullmatch('[a-z]{2,12}', word):
                 raise ValueError('Initials must contain 2..12 Latin letters')
-            pattern = r'(?<![a-z0-9])' + r'[\s.·]*'.join(word) + r'(?![a-z0-9])'
+            pattern = r'(?<![a-z0-9])' + r'[\s.·_-]*'.join(word) + r'(?![a-z0-9])'
+        elif mode == 'latin_token':
+            if not re.fullmatch(r'[a-z]+(?: [a-z]+)*', word):
+                raise ValueError('Latin tokens require alphabetic words separated by single spaces')
+            pattern = r'(?<![a-z0-9])' + re.escape(word) + r'(?![a-z0-9])'
         elif mode == 'literal':
             pattern = re.escape(word)
         else:

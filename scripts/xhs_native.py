@@ -124,12 +124,14 @@ def archive(project, path):
 
 
 def import_manifest(project, manifest_path):
+    from xhs_rounds import merge_discovery_entities
     manifest = xp.load(manifest_path)
     units = manifest.get("units")
     require(isinstance(units, list) and units, "Manifest needs explicit units")
     setup(project)
     # Resolve explicit legacy aliases before validation; never recreate a migrated placeholder.
     units = [dict(unit) for unit in units]
+    discovery_by_key = {}
     for unit in units:
         key = xp.dumps([unit.get("stage"), unit.get("target"), unit.get("sort", "")])
         migration = project.db.execute("SELECT * FROM native_scope_migrations WHERE old_key=? OR new_key=?", (key, key)).fetchone()
@@ -148,6 +150,11 @@ def import_manifest(project, manifest_path):
             require(unit.get("sort") in xp.SORTS, "Search sort must be explicit")
         if unit["stage"] == "author":
             require(author_uid(unit["target"]), "Author target requires observed public UID; use identity for unknown UID")
+        key = xp.dumps([unit["stage"], unit["target"], unit.get("sort", "")])
+        if key not in discovery_by_key:
+            row = project.db.execute("SELECT payload FROM tasks WHERE kind='native' AND entity_key=?", (key,)).fetchone()
+            discovery_by_key[key] = json.loads(row[0]) if row else {}
+        discovery_by_key[key] = merge_discovery_entities(discovery_by_key[key], unit)
     setup(project)
     imported = []
     for unit in units:
@@ -157,6 +164,7 @@ def import_manifest(project, manifest_path):
         key = xp.dumps([unit["stage"], unit["target"], unit.get("sort", "")])
         payload = dict(unit, provenance=sources, native_import=True)
         payload.pop("sources")
+        payload.update(discovery_by_key[key])
         previous = project.db.execute("SELECT payload FROM tasks WHERE kind='native' AND entity_key=?", (key,)).fetchone()
         if previous:
             # Old manifests add provenance, but cannot rewind a newer live checkpoint.

@@ -176,3 +176,7 @@ scripts/xhs_project_tab.mjs
 scripts/test_project_tab.py
 scripts/test_project_tab.mjs
 scripts/test_bridge_guard_reason.py
+references/person-search.md
+scripts/xhs_people.py
+scripts/test_people.py
+scripts/test_person_routes.py

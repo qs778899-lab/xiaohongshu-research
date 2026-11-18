@@ -266,6 +266,57 @@ def entity_disposition(body, cutoff):
     except ValueError:return 'date_unknown'
 
 
+def discovery_entities(payload):
+    """Validate discovery-only routing metadata; absence preserves legacy routing."""
+    keys = ('discovery_entity_ids', 'discovery_entity_labels')
+    family_keys = ('discovery_families', 'discovery_entity_families')
+    if not any(key in payload for key in (*keys, *family_keys)):
+        return None
+    ids, labels = (payload.get(key) for key in keys)
+    if (not isinstance(ids, list) or not ids
+            or any(not isinstance(x, str) or not x.strip() or x != x.strip() for x in ids)
+            or len(set(ids)) != len(ids)
+            or not isinstance(labels, dict) or set(labels) != set(ids)
+            or any(not isinstance(x, str) or not x.strip() or x != x.strip() for x in labels.values())):
+        raise ValueError('Explicit discovery IDs and exact nonempty labels required')
+    def valid_families(value):
+        return (isinstance(value, list)
+                and all(isinstance(x, str) and x.strip() == x and x for x in value)
+                and len(set(value)) == len(value))
+    if 'discovery_families' in payload and not valid_families(payload['discovery_families']):
+        raise ValueError('Discovery families must be unique nonempty strings')
+    if 'discovery_entity_families' in payload:
+        mapping = payload['discovery_entity_families']
+        if (not isinstance(mapping, dict) or not set(mapping).issubset(ids)
+                or any(not valid_families(value) for value in mapping.values())):
+            raise ValueError('Discovery entity families must refer to declared entity IDs')
+    return dict(labels)
+
+
+def merge_discovery_entities(previous, incoming):
+    """A shared query may serve multiple entities, without asserting attribution."""
+    old, new = discovery_entities(previous), discovery_entities(incoming)
+    if old is None and new is None:
+        return {}
+    merged = dict(old or {})
+    for key, value in (new or {}).items():
+        if key in merged and merged[key] != value:
+            raise ValueError('Conflicting discovery label for the same entity ID')
+        merged[key] = value
+    result = {'discovery_entity_ids': sorted(merged),
+              'discovery_entity_labels': {key: merged[key] for key in sorted(merged)}}
+    if any('discovery_families' in value for value in (previous, incoming)):
+        result['discovery_families'] = sorted(set(previous.get('discovery_families', []))
+                                             | set(incoming.get('discovery_families', [])))
+    if any('discovery_entity_families' in value for value in (previous, incoming)):
+        families = {}
+        for value in (previous, incoming):
+            for key, items in value.get('discovery_entity_families', {}).items():
+                families.setdefault(key, set()).update(items)
+        result['discovery_entity_families'] = {key: sorted(families[key]) for key in sorted(families)}
+    return result
+
+
 def scheduler_routes(p,rid,*,tasks=None,native_dispatch=None):
     """Discovery cohorts only, never a doctor's attribution to a patient comment."""
     cfg=round_config(p,rid);included=task_ids(p,rid)
@@ -278,7 +329,9 @@ def scheduler_routes(p,rid,*,tasks=None,native_dispatch=None):
     names=[str(x) for x in cfg['doctors']];routes={};byhash={};peers={}
     for t in tasks:
         d=t['payload'];peers.setdefault(d.get('target'),[]).append(t['id']);label=d.get('target','') if d.get('stage')=='search' else ''
-        routes[t['id']]={name for name in names if name in label}
+        entities=discovery_entities(d)
+        routes[t['id']]=({name for name in names if name in entities.values()}
+                        if entities is not None else {name for name in names if name in label})
         for h in d.get('bridge',{}).get('hashes',[]):byhash.setdefault(h,set()).add(t['id'])
     # Propagate discovery provenance across query -> note -> author/media; finite closure.
     changed=True
