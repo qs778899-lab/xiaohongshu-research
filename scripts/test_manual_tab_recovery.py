@@ -32,6 +32,7 @@ class ManualTabTests(unittest.TestCase):
         self.calls=[]
         self.capture={'uid':self.uid,'url':self.url,'stage':'search',
           'cards':[{'url':'https://www.xiaohongshu.com/explore/'+'3'*24,'text':'example'}]}
+        self.adopt_error=None
         self.error=None
         self.identity_uid=self.uid
         case=self
@@ -41,6 +42,7 @@ class ManualTabTests(unittest.TestCase):
             def call(self,action,b=None,role=None,**kw):
                 case.calls.append(action)
                 if action=='active_user_tab':return {'tabId':11,'windowId':22,'url':case.url,'active':True}
+                if action=='adopt_user_tab' and case.adopt_error:raise bridge.BridgeError(case.adopt_error)
                 if action=='adopt_user_tab':return {'page':'A'*32,'url':case.url,'owned':False}
                 if action=='identity':return {'uid':case.identity_uid,'url':case.url,'page':'A'*32}
                 if action=='capture':
@@ -63,6 +65,82 @@ class ManualTabTests(unittest.TestCase):
     def run_inspect(self,destination=None):
         with self.mocks():return m.inspect(destination or self.p,'old',self.meta,self.user,
                                          parent_project=self.p if destination else None)
+
+    def failed_focus_fixture(self):
+        self.adopt_error='USER_TAB_NOT_FOCUSED'
+        with self.assertRaisesRegex(bridge.BridgeError,'USER_TAB_NOT_FOCUSED'):self.run_inspect()
+        self.adopt_error=None
+        return next((self.p/'bridge/manual-tab-recoveries').glob('*/attempt.json'))
+
+    def test_finish_prebind_focus_rejects_copied_attempt_directory(self):
+        import shutil
+        f=self.failed_focus_fixture();copy=f.parent.parent/'copy'
+        shutil.copytree(f.parent,copy)
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'LOCATION_CHANGED'):m.finish_inspection(copy/'attempt.json')
+        self.assertEqual(self.calls,['adopt_user_tab'])
+
+    def test_finish_prebind_focus_rejects_candidate_account_or_context_change(self):
+        f=self.failed_focus_fixture();original=f.read_text()
+        for key in ['account_uid','context_id','runtime','extension_version']:
+            value=json.loads(original);value['candidate'][key]='changed';f.write_text(json.dumps(value))
+            with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'CANDIDATE_CHANGED'):m.finish_inspection(f)
+        self.assertEqual(self.calls,['adopt_user_tab'])
+
+    def test_finish_prebind_focus_rejects_changed_target_or_args(self):
+        f=self.failed_focus_fixture();original=f.read_text()
+        for key in ['target','args']:
+            value=json.loads(original);value[key]['url']='https://www.xiaohongshu.com/explore';f.write_text(json.dumps(value))
+            with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'ATTEMPT_CHANGED'):m.finish_inspection(f)
+        self.assertEqual(self.calls,['adopt_user_tab'])
+
+    def test_finish_prebind_focus_rejects_copied_reservation(self):
+        f=self.failed_focus_fixture();value=json.loads(f.read_text())
+        copied=self.p/'copy-reservation.json';copied.write_bytes(Path(value['account_attempt']['file']).read_bytes())
+        value['account_attempt']=m.pointer(copied);f.write_text(json.dumps(value))
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'RESERVATION_LOCATION_CHANGED'):m.finish_inspection(f)
+        self.assertEqual(self.calls,['adopt_user_tab'])
+
+    def test_finish_prebind_focus_preserves_original_and_requires_full_probe(self):
+        f=self.failed_focus_fixture();original=f.read_bytes();stop=self.stop.read_bytes()
+        with self.mocks():result=m.finish_inspection(f)
+        self.assertFalse(result['collection_permitted'])
+        self.assertEqual(f.read_bytes(),original);self.assertEqual(self.stop.read_bytes(),stop)
+        self.assertTrue((f.parent/'inspection-failure.json').exists())
+        self.assertEqual(self.calls,['adopt_user_tab','adopt_user_tab','identity','capture'])
+
+    def test_finish_prebind_focus_is_single_use_even_after_second_focus_failure(self):
+        f=self.failed_focus_fixture();self.adopt_error='USER_TAB_NOT_FOCUSED'
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'USER_TAB_NOT_FOCUSED'):m.finish_inspection(f)
+        calls=list(self.calls)
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'ALREADY_ATTEMPTED'):m.finish_inspection(f)
+        self.assertEqual(self.calls,calls)
+
+    def test_finish_prebind_focus_rejects_unknown_or_access_failure(self):
+        f=self.failed_focus_fixture()
+        for error in ['ACCESS_STOP','COMMAND_OUTCOME_UNKNOWN','USER_TAB_CHANGED']:
+            (f.parent/'inspection-failure.json').write_text(json.dumps({'error':error}))
+            with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'PREBIND_FOCUS'):m.finish_inspection(f)
+        self.assertEqual(self.calls,['adopt_user_tab'])
+
+    def test_finish_prebind_focus_rejects_existing_binding_progress(self):
+        f=self.failed_focus_fixture();(f.parent/'adopted.json').write_text('{}')
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'MAY_HAVE_PROGRESS'):m.finish_inspection(f)
+        self.assertEqual(self.calls,['adopt_user_tab'])
+
+    def test_finish_prebind_focus_rejects_changed_parent(self):
+        f=self.failed_focus_fixture();self.parent['context_id']='other-context'
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'PARENT_CHANGED'):m.finish_inspection(f)
+        self.assertEqual(self.calls,['adopt_user_tab'])
+
+    def test_finish_prebind_focus_rejects_new_stop(self):
+        f=self.failed_focus_fixture();self.stops['k']['sha256']='changed'
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'STOP_CHANGED'):m.finish_inspection(f)
+        self.assertEqual(self.calls,['adopt_user_tab'])
+
+    def test_finish_prebind_focus_rejects_wrong_account_after_adoption(self):
+        f=self.failed_focus_fixture();self.identity_uid='9'*24
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'IDENTITY_CHANGED'):m.finish_inspection(f)
+        self.assertFalse((f.parent/'inspection.json').exists())
 
     def test_cross_project_inherits_prior_exclusions_in_new_grant(self):
         self.parent['manual_excluded_note_ids']=['7'*24]
