@@ -2198,7 +2198,11 @@ def work(project,name,units=10,max_seconds=300,interval=10,task_ids=None,emit=No
                 except legacy.CollectionBusy:
                     time.sleep(min(interval,5));continue
                 except legacy.ResearchError as exc:
-                    reason=getattr(exc,'code',b.get('last_error',{}).get('code','SHARED_STOP'))
+                    # The lease can reject before save_failure runs. A saved
+                    # binding error belongs to a previous attempt and must not
+                    # turn a current account stop into a task-local retry/hold.
+                    reason=('SHARED_STOP' if isinstance(exc,legacy.StopRun)
+                            else getattr(exc,'code','CONNECTOR_ERROR'))
                     if reason=='UNEXPECTED_TARGET_CHANGE' and b.get('allow_home_restore'):
                         role='search' if task['payload']['stage']=='search' else 'detail'
                         try:

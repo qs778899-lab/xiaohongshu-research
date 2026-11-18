@@ -175,3 +175,4 @@ scripts/xhs_project_tab.py
 scripts/xhs_project_tab.mjs
 scripts/test_project_tab.py
 scripts/test_project_tab.mjs
+scripts/test_bridge_guard_reason.py
