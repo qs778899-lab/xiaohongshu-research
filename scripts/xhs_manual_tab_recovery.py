@@ -75,8 +75,29 @@ def require_capture(data,b,args):
     if args['stage']=='search':
         nr.require(bool(data.get('cards')),'MANUAL_SEARCH_CONTENT_REQUIRED')
     else:
-        nr.require(bool(data.get('title','').strip()) and bool(data.get('body','').strip()),'MANUAL_NOTE_CONTENT_REQUIRED')
+        nr.require(not any(data.get(k) for k in ('loginWall','securityBlock','notFound','loading')),
+                   'MANUAL_CAPTURE_FAILED')
+        title,body=data.get('title'),data.get('body')
+        nr.require(isinstance(title,str) and isinstance(body,str) and bool(body.strip()),
+                   'MANUAL_NOTE_CONTENT_REQUIRED')
         nr.require(bool(data.get('authors')),'MANUAL_NOTE_AUTHOR_REQUIRED')
+        if not title.strip():
+            # An observed empty title is valid; an absent title or loading shell is not.
+            authors=data['authors']
+            nr.require(data.get('stage')=='body'
+                       and body.strip() not in {'[图片]','[图片评论]','加载中','加载中...','加载中…','正在加载...', 'Loading...','Loading…'}
+                       and isinstance(authors,list)
+                       and any(valid_public_author(a) for a in authors),'MANUAL_NOTE_AUTHOR_REQUIRED')
+
+def valid_public_author(author):
+    if not isinstance(author,dict) or not isinstance(author.get('name'),str) or not author['name'].strip():
+        return False
+    url=author.get('url')
+    if not isinstance(url,str):return False
+    try:parsed=urlparse(url)
+    except ValueError:return False
+    return (parsed.scheme=='https' and parsed.netloc=='www.xiaohongshu.com' and not parsed.fragment
+            and re.fullmatch(r'/user/profile/[a-f0-9]{24}/?',parsed.path) is not None)
 
 def inspect(project,parent_name,metadata_file,user_file,parent_project=None):
     project=Path(project).resolve()
@@ -524,13 +545,44 @@ def validate_verified_search(inspected):
     require_capture(check_pointer(inspected['capture']),initial['binding'],args)
 
 def finish_note(inspection_file):
-    """Validate already captured same-note content after a canonical URL change."""
+    """Validate saved normal content after a local URL or empty-title rejection."""
     inspected,_=nr.read_json(inspection_file);root=Path(inspection_file).parent
     attempt=check_pointer(inspected['attempt']);b=inspected['binding']
     failure,_=nr.read_json(root/'note-failure.json');started,_=nr.read_json(root/'note-attempt.json')
     meta,_=nr.read_json(root/'note-metadata-0.json');capture,_=nr.read_json(root/'note-capture-0.json')
-    nr.require(failure.get('error')=='MANUAL_CAPTURE_TARGET_CHANGED','MANUAL_SAVED_NOTE_NOT_APPLICABLE')
+    titleless=(failure.get('error')=='MANUAL_NOTE_CONTENT_REQUIRED'
+               and isinstance(capture.get('title'),str) and not capture['title'].strip())
+    nr.require(failure.get('error')=='MANUAL_CAPTURE_TARGET_CHANGED' or titleless,
+               'MANUAL_SAVED_NOTE_NOT_APPLICABLE')
+    nr.require(not (root/'note-probe.json').exists(),'MANUAL_NOTE_ALREADY_FINISHED')
+    history=None
+    if titleless:
+        before,_=nr.read_json(root/'note-before.json');navigation,_=nr.read_json(root/'note-navigation.json')
+        search=check_pointer(inspected['capture']);parent=check_pointer(attempt['parent'])
+        nr.require(proof_args(search['url'])['stage']=='search','MANUAL_ACTUAL_SEARCH_REQUIRED')
+        require_capture(search,b,proof_args(search['url']))
+        nr.require(started.get('inspection')==pointer(inspection_file)
+                   and started.get('scope')=='one_observed_public_note_health_check_only'
+                   and started.get('note_id')==note_id(started['url']), 'MANUAL_NOTE_HISTORY_CHANGED')
+        nr.require(not any(record.get(k) for record in (before,meta,navigation)
+                   for k in ('error','loginWall','securityBlock','notFound','loading')),'MANUAL_CAPTURE_FAILED')
+        nr.require(navigation.get('navigationSubmitted') is True
+                   and before.get('page')==b['tabs']['detail']['page'] and before.get('url')==search['url']
+                   and failure.get('collection_permitted') is False
+                   and nr.stamp(failure.get('at'))>=nr.stamp(started.get('at')),
+                   'MANUAL_NOTE_HISTORY_CHANGED')
+        nr.require(started['url'] in {c.get('url') for c in search.get('cards',[])},
+                   'MANUAL_ACTUALLY_OBSERVED_CARD_REQUIRED')
+        nr.require(note_id(started['url']) not in excluded_notes(parent),'ORIGINAL_RESTRICTED_NOTE_EXCLUDED')
+        nr.require(not list(root.glob('note-capture-[1-9]*.json'))
+                   and not list(root.glob('note-metadata-[1-9]*.json')),'MANUAL_NOTE_HISTORY_CHANGED')
+        history={name:pointer(root/name) for name in ('note-failure.json','note-attempt.json',
+                 'note-before.json','note-navigation.json','note-metadata-0.json','note-capture-0.json')}
     nr.require(meta.get('page')==b['tabs']['detail']['page'],'MANUAL_PAGE_CHANGED')
+    if titleless:
+        nr.require(capture.get('page',meta['page'])==meta['page']
+                   and all(v.get('windowId') in (None,b['tabs']['detail']['window_id']) for v in (before,meta)),
+                   'MANUAL_PAGE_CHANGED')
     nr.require(note_id(meta['url'])==note_id(started['url'])==note_id(capture['url']),'MANUAL_NOTE_TARGET_CHANGED')
     require_capture(capture,b,proof_args(started['url']))
     with nr.locked_stops(b['profile_guard_key'],b['account_uid']) as keys:
@@ -542,6 +594,7 @@ def finish_note(inspection_file):
                 'capture':pointer(root/'note-capture-0.json'),'excluded_note_id':note_id(original) if original else None,
                 'collection_permitted':False,'stops_unchanged':True,
                 'local_validation_of_existing_capture':True,'preserved_failure':pointer(root/'note-failure.json')}
+        if history:result['saved_titleless_note_history']=history
         evidence(root/'note-probe.json',result)
         return {'probe':str(root/'note-probe.json'),'capture':result['capture'],'collection_permitted':False}
 
@@ -560,6 +613,23 @@ def validated_probe(probe_ref):
     probe=check_pointer(probe_ref)
     nr.require(probe.get('kind')==KIND,'MANUAL_PROBE_KIND_REQUIRED')
     inspected=check_pointer(probe['inspection']);attempt=check_pointer(inspected['attempt'])
+    if probe.get('saved_titleless_note_history'):
+        root=Path(probe['inspection']['file']).parent
+        history=probe['saved_titleless_note_history']
+        nr.require(set(history)=={'note-failure.json','note-attempt.json','note-before.json',
+                   'note-navigation.json','note-metadata-0.json','note-capture-0.json'},'MANUAL_NOTE_HISTORY_CHANGED')
+        for name,ref in history.items():
+            nr.require(ref.get('file')==str((root/name).resolve()),'MANUAL_NOTE_HISTORY_CHANGED')
+            check_pointer(ref)
+        nr.require(probe['capture']==history['note-capture-0.json']
+                   and probe.get('preserved_failure')==history['note-failure.json'],'MANUAL_NOTE_HISTORY_CHANGED')
+    if probe.get('prior_grant'):
+        prior=check_pointer(probe['prior_grant'])
+        nr.require(prior.get('kind')==GRANT_KIND and prior.get('scope')=='rendered_public_web_only'
+                   and prior.get('authority')==authority(probe['binding'])
+                   and prior.get('stops')==attempt['stops'],'MANUAL_PRIOR_GRANT_CHANGED')
+        prior_probe,_,_=validated_probe(prior['probe'])
+        validate_review(check_pointer(prior['review']),prior_probe)
     initial=check_pointer(inspected['initial_inspection']) if inspected.get('initial_inspection') else inspected
     nr.require(initial['attempt']==inspected['attempt'],'MANUAL_ATTEMPT_CHANGED')
     continuation_root=Path(inspected.get('initial_inspection',probe['inspection'])['file']).parent

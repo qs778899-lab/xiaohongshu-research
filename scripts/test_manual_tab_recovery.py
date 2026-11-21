@@ -336,6 +336,123 @@ class ManualTabTests(unittest.TestCase):
         self.assertEqual(m.proof_args(a),m.proof_args(b))
         self.assertNotEqual(m.proof_args(a),m.proof_args(b.replace('3'*24,'4'*24)))
 
+    def saved_titleless_fixture(self):
+        inspection=Path(self.run_inspect()['inspection']);root=inspection.parent
+        url=self.capture['cards'][0]['url']
+        note={'uid':self.uid,'url':url,'stage':'body','title':'',
+              'body':'A complete synthetic account of a public exhibition.',
+              'authors':[{'name':'Example writer','url':'https://www.xiaohongshu.com/user/profile/'+'5'*24}]}
+        files={'note-attempt.json':{'at':'2026-11-11T02:00:00+00:00','inspection':m.pointer(inspection),
+                  'url':url,'note_id':'3'*24,'scope':'one_observed_public_note_health_check_only'},
+               'note-failure.json':{'at':'2026-11-11T02:01:00+00:00','error':'MANUAL_NOTE_CONTENT_REQUIRED','collection_permitted':False},
+               'note-before.json':{'page':'A'*32,'url':self.url},
+               'note-navigation.json':{'navigationSubmitted':True},
+               'note-metadata-0.json':{'page':'A'*32,'url':url},'note-capture-0.json':note}
+        for name,value in files.items():m.evidence(root/name,value)
+        return inspection
+
+    def test_titleless_saved_note_finishes_without_browser_and_preserves_source(self):
+        inspection=self.saved_titleless_fixture();root=inspection.parent
+        originals={f.name:f.read_bytes() for f in root.iterdir() if f.is_file()}
+        before=list(self.calls)
+        with self.mocks(),patch.object(bridge,'Driver',side_effect=AssertionError('No browser')):
+            result=m.finish_note(inspection)
+            with self.assertRaisesRegex(bridge.BridgeError,'ALREADY_FINISHED'):m.finish_note(inspection)
+        self.assertEqual(self.calls,before);self.assertFalse(result['collection_permitted'])
+        for name,value in originals.items():self.assertEqual((root/name).read_bytes(),value)
+        probe=m.check_pointer(m.pointer(result['probe']));self.assertEqual(m.check_pointer(probe['capture'])['title'],'')
+        self.assertEqual(m.validated_probe(m.pointer(result['probe']))[2]['body'],
+                         'A complete synthetic account of a public exhibition.')
+        review=self.put('titleless-review.json',{'reader':'codex','reviewed':True,'body_read':True,
+            'capture_sha256':probe['capture']['sha256'],'summary':'Read the empty title field, full narrative and named author.',
+            'positions':['/title','/body','/authors'],'comments_read':False,'media_read':False})
+        with self.mocks():granted=m.attest(result['probe'],review,'titleless')
+        self.assertEqual(granted['state'],'ready');self.assertTrue(granted['stops_unchanged'])
+
+    def test_titleless_capture_requires_observed_title_body_author_and_normal_state(self):
+        inspection=self.saved_titleless_fixture();b=json.loads(inspection.read_text())['binding']
+        capture=json.loads((inspection.parent/'note-capture-0.json').read_text());args=m.proof_args(capture['url'])
+        changes=[{'title':None},{'title':False},{'body':''},{'body':'  '},{'body':123},{'body':'[图片]'},{'body':'加载中…'},{'body':'Loading...'},
+                 {'authors':[]},{'authors':[{'name':'Example'}]},
+                 {'authors':[{'name':'Example','url':'https://example.org/user/profile/'+'5'*24}]},
+                 {'authors':[{'name':'','url':'https://www.xiaohongshu.com/user/profile/'+'5'*24}]},
+                 {'stage':'search'},{'loading':True},{'loginWall':True},{'securityBlock':True},{'notFound':True},
+                 {'uid':'9'*24},{'url':capture['url'].replace('3'*24,'4'*24)}]
+        for change in changes:
+            with self.subTest(change=change),self.assertRaises(bridge.BridgeError):
+                m.require_capture(dict(capture,**change),b,args)
+        missing=dict(capture);del missing['title']
+        with self.assertRaisesRegex(bridge.BridgeError,'NOTE_CONTENT_REQUIRED'):m.require_capture(missing,b,args)
+
+    def test_titleless_saved_note_rejects_changed_or_unsubmitted_history(self):
+        inspection=self.saved_titleless_fixture();root=inspection.parent
+        changes=[('note-failure.json','error','ACCESS_STOP'),('note-failure.json','error','COMMAND_OUTCOME_UNKNOWN'),
+                 ('note-attempt.json','note_id','4'*24),('note-attempt.json','inspection',{}),
+                 ('note-attempt.json','url','https://www.xiaohongshu.com/explore/'+'4'*24),
+                 ('note-navigation.json','navigationSubmitted',False),('note-before.json','url','https://www.xiaohongshu.com/explore'),
+                 ('note-before.json','securityBlock',True),('note-metadata-0.json','securityBlock',True),
+                 ('note-navigation.json','error','ACCESS_STOP'),('note-metadata-0.json','loading',True),
+                 ('note-metadata-0.json','page','B'*32),('note-metadata-0.json','windowId',99),
+                 ('note-capture-0.json','title','A nonempty title'),('note-capture-0.json','body',''),
+                 ('note-capture-0.json','url','https://www.xiaohongshu.com/explore/'+'4'*24)]
+        for name,key,value in changes:
+            path=root/name;original=path.read_bytes();changed=json.loads(original);changed[key]=value;path.write_text(json.dumps(changed))
+            try:
+                with self.subTest(name=name,key=key,value=value),self.mocks(),self.assertRaises(bridge.BridgeError):m.finish_note(inspection)
+                self.assertFalse((root/'note-probe.json').exists())
+            finally:path.write_bytes(original)
+        (root/'note-capture-1.json').write_text('{}')
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'HISTORY_CHANGED'):m.finish_note(inspection)
+
+    def test_titleless_saved_note_rejects_new_stop_without_grant(self):
+        inspection=self.saved_titleless_fixture();self.stops['k']['sha256']='changed'
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'STOP_CHANGED'):m.finish_note(inspection)
+        self.assertFalse((inspection.parent/'note-probe.json').exists())
+
+    def test_saved_canonical_url_validation_remains_supported(self):
+        inspection=self.saved_titleless_fixture();root=inspection.parent
+        failure=json.loads((root/'note-failure.json').read_text());failure['error']='MANUAL_CAPTURE_TARGET_CHANGED'
+        (root/'note-failure.json').write_text(json.dumps(failure))
+        capture=json.loads((root/'note-capture-0.json').read_text());capture['title']='Exhibition diary'
+        (root/'note-capture-0.json').write_text(json.dumps(capture))
+        with self.mocks(),patch.object(bridge,'Driver',side_effect=AssertionError('No browser')):result=m.finish_note(inspection)
+        self.assertFalse(result['collection_permitted'])
+        self.assertEqual(m.validated_probe(m.pointer(result['probe']))[2]['title'],'Exhibition diary')
+
+    def test_titleless_saved_note_grant_chain_rejects_later_history_edit(self):
+        inspection=self.saved_titleless_fixture()
+        with self.mocks():result=m.finish_note(inspection)
+        (inspection.parent/'note-navigation.json').write_text('{"navigationSubmitted":false}')
+        with self.assertRaisesRegex(bridge.BridgeError,'EVIDENCE_CHANGED'):m.validated_probe(m.pointer(result['probe']))
+
+    def test_titleless_recheck_keeps_original_failure_history_in_new_grant(self):
+        inspection=self.saved_titleless_fixture()
+        with self.mocks():finished=m.finish_note(inspection)
+        probe=m.check_pointer(m.pointer(finished['probe']));capture=m.check_pointer(probe['capture'])
+        review={'reader':'codex','reviewed':True,'body_read':True,'capture_sha256':probe['capture']['sha256'],
+                'summary':'Actually read the empty title, author and full narrative.',
+                'positions':['/title','/body','/authors'],'comments_read':False,'media_read':False}
+        review_path=self.put('first-review.json',review)
+        with self.mocks():m.attest(finished['probe'],review_path,'first-titleless')
+        class Driver:
+            def __init__(self,*args):pass
+            def close(self):pass
+            def call(self,action,*args,**kwargs):
+                if action in {'metadata','identity'}:return {'page':'A'*32,'url':capture['url'],'uid':capture['uid'],'visible':True}
+                if action=='capture':return capture
+                raise AssertionError(action)
+        @contextlib.contextmanager
+        def lock(*args):yield ['k']
+        with patch.object(bridge,'Driver',Driver),patch.object(m.nr,'locked_stops',lock),patch.object(m.nr,'current_stops',return_value=self.stops):
+            checked=m.recheck(self.p,'first-titleless')
+            review['capture_sha256']=checked['capture']['sha256']
+            second_review=self.put('second-review.json',review)
+            m.attest(checked['probe'],second_review,'second-titleless')
+            binding=bridge.load_binding(self.p,'second-titleless')
+            m.web_exceptions(self.p,binding,['k'])
+            (inspection.parent/'note-navigation.json').write_text('{"navigationSubmitted":false}')
+            with self.assertRaisesRegex(bridge.BridgeError,'EVIDENCE_CHANGED'):m.web_exceptions(self.p,binding,['k'])
+
     def complete_probe_fixture(self,destination=None):
         inspected_path=Path(self.run_inspect(destination)['inspection'])
         root=inspected_path.parent;inspected=json.loads(inspected_path.read_text())
