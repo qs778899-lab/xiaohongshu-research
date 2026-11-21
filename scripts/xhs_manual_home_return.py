@@ -1,4 +1,4 @@
-"""Return a verified manual tab from the exact normal homepage to its last note.
+"""Return a verified tab from an exact normal home to its observed note or author.
 
 This uses the existing web grant. It cannot recover account access, create a
 grant, replace a tab, retry an uncertain navigation, or complete research tasks.
@@ -67,7 +67,7 @@ def task_snapshot(project,task_id):
     try:task=db.task(task_id)
     finally:db.close()
     nr.require(task and task.get('kind')=='native' and task.get('status')=='pending'
-               and task['payload'].get('stage') in {'search','author'},'HOME_RETURN_PENDING_SEARCH_REQUIRED')
+               and task['payload'].get('stage') in {'search','author','body','roots','replies','images','video'},'HOME_RETURN_PENDING_SEARCH_REQUIRED')
     return task
 
 
@@ -131,7 +131,7 @@ def observed_failure(metadata,log,task,b):
     nr.require(log.get('event')=='blocked' and log.get('reason')=='UNEXPECTED_TARGET_CHANGE'
                and log.get('task_id')==task['id'] and log.get('actor')=='codex',
                'HOME_RETURN_PRE_NAVIGATION_FAILURE_REQUIRED')
-    if task['payload']['stage']=='search':
+    if task['payload']['stage']!='author':
         nr.require(not target_key(slot['last_url']).startswith('author:')
                    and log.get('processed_units')==0 and log.get('metrics',{}).get('calls')==1,
                    'HOME_RETURN_PRE_NAVIGATION_FAILURE_REQUIRED')

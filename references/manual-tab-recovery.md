@@ -61,7 +61,7 @@ CDP 元数据有时不返回 Chrome 窗口编号，不能用空值覆盖先前�
 
 对于非预期回首页，先记录实际URL和点击时点，不能仅凭跳转就认定有人操作。静置观察及普通评论批次未复现故障时可报告恢复后的真实进展，同时保留原因未确定和旧现场；不得宣称已经修好未知原因。
 
-已有自主返回授权、原手动绑定的网页凭据仍有效，且搜索在新导航前只做一次元数据核验即因 `UNEXPECTED_TARGET_CHANGE` 停止时，可用 `xhs_manual_home_return.py --project P --binding B return --task TASK --metadata META --failure-log LOG --authorization "实际既有授权依据"`。只接收精确普通首页 `https://www.xiaohongshu.com/explore` 或带唯一参数 `?channel_id=homefeed_recommend` 的推荐首页，不接收 `source=404`、验证码、额外参数、其他页面或未决导航；搜索返回目标仍必须是原 `last_url` 的同账号正常正文归档。核对同一 CDP、原生标签、窗口、账号及 STOP 后只导航一次，原绑定、失败日志、任务断点和消费记录均保存。
+已有自主返回授权、原手动绑定的网页凭据仍有效，且搜索或笔记的正文、评论、回复、图片、视频任务在新导航前只做一次元数据核验即因 `UNEXPECTED_TARGET_CHANGE` 停止时，可用 `xhs_manual_home_return.py --project P --binding B return --task TASK --metadata META --failure-log LOG --authorization "实际既有授权依据"`。只接收精确普通首页 `https://www.xiaohongshu.com/explore` 或带唯一参数 `?channel_id=homefeed_recommend` 的推荐首页，不接收 `source=404`、验证码、额外参数、其他页面或未决导航；搜索返回目标仍必须是原 `last_url` 的同账号正常正文归档。核对同一 CDP、原生标签、窗口、账号及 STOP 后只导航一次，原绑定、失败日志、任务断点和消费记录均保存。
 
 作者分页期间意外返回上述首页时，也可使用同一入口。要求原 `last_url` 精确对应该作者任务，失败批次已有成功单元，日志中的单元数、任务、末次快照与队列一致；所有相关快照必须已登记且哈希、同账号及作者页卡片地址有效。恢复到这个已观察作者页，不借此改换作者、标签或账号。返回后实际筛读卡片，并在审核回执中使用 `cards_read=true`、`body_read=false`、`positions=["/cards"]` 及当前 capture 哈希；不把标题阅读记成正文或治疗记录阅读。没有正常历史卡片、分页仍在导航中或恢复结果不明时保留阻塞，不能重复恢复。
 

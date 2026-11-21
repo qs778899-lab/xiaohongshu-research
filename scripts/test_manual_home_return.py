@@ -109,6 +109,23 @@ class HomeReturnTests(unittest.TestCase):
         self.assertTrue(self.task_before['payload']['bridge']['hashes']);self.restore()
         self.assertEqual(self.db.task(self.task),self.task_before)
 
+    def test_note_stages_share_the_same_pre_navigation_home_return(self):
+        for stage in ['body','roots','replies','images','video']:
+            with self.subTest(stage=stage):
+                case=HomeReturnTests(methodName='runTest');case.setUp()
+                try:
+                    target=case.before['tabs']['detail']['last_url']
+                    source=case.fixture.put('note-source.json',{'url':target})
+                    manifest=case.fixture.put('note-task.json',{'units':[{'stage':stage,
+                        'target':manual.note_id(target),'sources':[str(source)],'next':'Read remaining scope'}]})
+                    case.task=native.import_manifest(case.db,manifest)['task_ids'][0]
+                    case.task_before=case.db.task(case.task)
+                    log=json.loads(case.log.read_text());log['task_id']=case.task;case.log.write_text(json.dumps(log))
+                    result=case.restore();case.attest(result)
+                    self.assertEqual(case.db.task(case.task),case.task_before)
+                    self.assertEqual(case.driver.calls.count('navigate'),1);case.unchanged_stops()
+                finally:case.doCleanups()
+
     def test_recommendation_home_requires_exact_observed_url(self):
         home=helper.HOME+'?channel_id=homefeed_recommend'
         self.metadata.write_text(json.dumps({'page':self.before['tabs']['detail']['page'],'url':home,'windowId':None}))
