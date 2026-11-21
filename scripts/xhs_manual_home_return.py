@@ -10,6 +10,7 @@ import json
 from pathlib import Path
 import re
 import time
+from urllib.parse import urlparse
 
 import xhs_bridge as bridge
 import xhs_manual_tab_recovery as manual
@@ -19,7 +20,38 @@ import xhs_project as xp
 from xhs_batch import batch_lock
 
 HOME='https://www.xiaohongshu.com/explore'
+HOMES={HOME, HOME+'?channel_id=homefeed_recommend'}
 KIND='manual-normal-home-last-note-return_v1'
+
+
+def target_key(target):
+    bridge.safe_url(target)
+    note=manual.note_id(target)
+    if note:return note
+    match=re.fullmatch(r'/user/profile/([a-f0-9]{24})',urlparse(target).path)
+    nr.require(match,'HOME_RETURN_NORMAL_NOTE_REQUIRED')
+    return 'author:'+match[1]
+
+
+def capture_args(target):
+    if not target_key(target).startswith('author:'):return manual.proof_args(target)
+    return {'stage':'author','expectedPath':urlparse(target).path,'backgroundText':True}
+
+
+def require_capture(value,b,target):
+    if not target_key(target).startswith('author:'):
+        return manual.require_capture(value,b,manual.proof_args(target))
+    normal_page(value)
+    nr.require(value.get('stage')=='author' and value.get('uid')==b['account_uid']
+               and target_key(value.get('url'))==target_key(target), 'HOME_RETURN_AUTHOR_CAPTURE_REQUIRED')
+    cards=value.get('cards')
+    nr.require(isinstance(cards,list) and bool(cards),'HOME_RETURN_AUTHOR_CAPTURE_REQUIRED')
+    prefix=urlparse(target).path+'/'
+    for card in cards:
+        nr.require(isinstance(card,dict),'HOME_RETURN_AUTHOR_CAPTURE_REQUIRED')
+        bridge.safe_url(card.get('url'))
+        nr.require(re.fullmatch(re.escape(prefix)+r'[a-f0-9]{24}',urlparse(card['url']).path)
+                   and isinstance(card.get('text'),str),'HOME_RETURN_AUTHOR_CAPTURE_REQUIRED')
 
 
 def normal_page(value):
@@ -35,7 +67,7 @@ def task_snapshot(project,task_id):
     try:task=db.task(task_id)
     finally:db.close()
     nr.require(task and task.get('kind')=='native' and task.get('status')=='pending'
-               and task['payload'].get('stage')=='search','HOME_RETURN_PENDING_SEARCH_REQUIRED')
+               and task['payload'].get('stage') in {'search','author'},'HOME_RETURN_PENDING_SEARCH_REQUIRED')
     return task
 
 
@@ -47,7 +79,7 @@ def failure_log(path,sha=None):
     try:rows=[json.loads(line) for line in raw.decode().splitlines() if line.strip()]
     except (ValueError,UnicodeError):raise bridge.BridgeError('HOME_RETURN_FAILURE_LOG_REQUIRED')
     nr.require(rows and isinstance(rows[-1],dict),'HOME_RETURN_FAILURE_LOG_REQUIRED')
-    return rows[-1],{'file':str(path),'sha256':actual}
+    return dict(rows[-1],prior_units=[r for r in rows[:-1] if isinstance(r,dict) and r.get('event')=='unit']),{'file':str(path),'sha256':actual}
 
 
 def context(project,name):
@@ -60,7 +92,7 @@ def context(project,name):
                and type(slot.get('chrome_tab_id')) is int and type(slot.get('window_id')) is int,
                'HOME_RETURN_VERIFIED_MANUAL_TAB_REQUIRED')
     nr.require(not slot.get('navigation_intent'),'HOME_RETURN_NO_INFLIGHT_NAVIGATION_REQUIRED')
-    target=slot.get('last_url');note=manual.note_id(target)
+    target=slot.get('last_url');note=target_key(target)
     nr.require(note and note not in b.get('manual_excluded_note_ids',[]),'HOME_RETURN_NORMAL_NOTE_REQUIRED')
     key=xp.digest({'kind':KIND,'project':str(Path(project).resolve()),'binding':name,
         'uid':b['account_uid'],'page':slot['page'],'session':slot['session'],
@@ -74,7 +106,7 @@ def restore_source(project,b,target):
     value=manual.check_pointer(source)
     if value.get('url')==target:
         normal_page(value)
-        manual.require_capture(value,b,manual.proof_args(target));return source
+        require_capture(value,b,target);return source
     files=list((Path(project)/'bridge/raw').glob('*.json'))+list((Path(project)/'native-sources').glob('*'))
     for path in sorted(files):
         if not path.is_file() or path.is_symlink() or not re.fullmatch('[a-f0-9]{64}',path.stem):continue
@@ -83,9 +115,9 @@ def restore_source(project,b,target):
         try:value=json.loads(raw)
         except (ValueError,UnicodeError):continue
         if not isinstance(value,dict) or value.get('url')!=target or value.get('uid')!=b['account_uid']:continue
-        if value.get('stage') not in {'body','roots','replies'}:continue
+        if value.get('stage') not in {'body','roots','replies','author'}:continue
         try:
-            normal_page(value);manual.require_capture(value,b,manual.proof_args(target))
+            normal_page(value);require_capture(value,b,target)
         except bridge.BridgeError:continue
         return manual.pointer(path)
     raise bridge.BridgeError('HOME_RETURN_OBSERVED_NORMAL_NOTE_REQUIRED')
@@ -94,12 +126,30 @@ def restore_source(project,b,target):
 def observed_failure(metadata,log,task,b):
     slot=b['tabs']['detail']
     bridge.safe_url(metadata.get('url'))
-    nr.require(metadata.get('url')==HOME and metadata.get('page')==slot['page']
+    nr.require(metadata.get('url') in HOMES and metadata.get('page')==slot['page']
                and metadata.get('windowId') in (None,slot['window_id']), 'HOME_RETURN_EXACT_HOME_REQUIRED')
     nr.require(log.get('event')=='blocked' and log.get('reason')=='UNEXPECTED_TARGET_CHANGE'
-               and log.get('processed_units')==0 and log.get('task_id')==task['id']
-               and log.get('actor')=='codex' and log.get('metrics',{}).get('calls')==1,
+               and log.get('task_id')==task['id'] and log.get('actor')=='codex',
                'HOME_RETURN_PRE_NAVIGATION_FAILURE_REQUIRED')
+    if task['payload']['stage']=='search':
+        nr.require(not target_key(slot['last_url']).startswith('author:')
+                   and log.get('processed_units')==0 and log.get('metrics',{}).get('calls')==1,
+                   'HOME_RETURN_PRE_NAVIGATION_FAILURE_REQUIRED')
+    else:
+        prior=log.get('prior_units',[]);state=task['payload'].get('bridge',{})
+        nr.require(target_key(slot['last_url'])=='author:'+task['payload']['target']
+                   and type(log.get('processed_units')) is int and log['processed_units']>0
+                   and len(prior)==log['processed_units']
+                   and all(u.get('task_id')==task['id'] and u.get('snapshot') for u in prior)
+                   and prior[-1]['snapshot']==state.get('last_snapshot'),
+                   'HOME_RETURN_OBSERVED_AUTHOR_PROGRESS_REQUIRED')
+        for unit in prior:
+            path=Path(unit['snapshot'])
+            nr.require(path.stem in state.get('hashes',[]) and path.is_file()
+                       and not path.is_symlink(),'HOME_RETURN_OBSERVED_AUTHOR_PROGRESS_REQUIRED')
+            value,_=nr.read_json(path,path.stem)
+            nr.require(value.get('url')==slot['last_url'],'HOME_RETURN_OBSERVED_AUTHOR_PROGRESS_REQUIRED')
+            require_capture(value,b,slot['last_url'])
 
 
 def observe(driver,b,expected,root,prefix,same_note=False):
@@ -109,7 +159,7 @@ def observe(driver,b,expected,root,prefix,same_note=False):
         value=driver.call(action,b,'detail',**kw)
         refs[label]=manual.evidence(root/(prefix+'-'+label+'.json'),value);return value
     meta=save('metadata','metadata');normal_page(meta)
-    target_ok=(manual.note_id(meta.get('url'))==manual.note_id(expected) if same_note else meta.get('url')==expected)
+    target_ok=(target_key(meta.get('url'))==target_key(expected) if same_note else meta.get('url')==expected)
     nr.require(meta.get('page')==slot['page'] and target_ok
                and meta.get('windowId') in (None,slot['window_id']),'HOME_RETURN_PAGE_CHANGED')
     ident=save('identity','identity');normal_page(ident)
@@ -140,7 +190,7 @@ def restore(project,name,task_id,metadata_file,log_file,authorization,driver=Non
             attempt_ref=manual.evidence(root/'attempt.json',attempt)
             try:
                 driver=driver or bridge.Driver(b['runtime'])
-                before=observe(driver,b,HOME,root,'before')
+                before=observe(driver,b,metadata['url'],root,'before')
                 nr.require(nr.current_stops(keys)==stops,'HOME_RETURN_STOP_CHANGED')
                 nr.require(bridge.load_binding(project,name)==original,'HOME_RETURN_BINDING_CHANGED')
                 b['tabs']['detail']['navigation_intent']={'url':target,'at':xp.legacy.now(),
@@ -151,15 +201,15 @@ def restore(project,name,task_id,metadata_file,log_file,authorization,driver=Non
                 nr.require(navigation.get('navigationSubmitted') is True,'HOME_RETURN_NAVIGATION_UNKNOWN')
                 time.sleep(1)
                 after=observe(driver,b,target,root,'after',same_note=True)
-                capture=driver.call('capture',b,'detail',**manual.proof_args(target))
+                capture=driver.call('capture',b,'detail',**capture_args(target))
                 capture_ref=manual.evidence(root/'capture.json',capture);normal_page(capture)
-                manual.require_capture(capture,b,manual.proof_args(target))
+                require_capture(capture,b,target)
                 nr.web_exceptions(project,name,keys)
                 nr.require(nr.current_stops(keys)==stops,'HOME_RETURN_STOP_CHANGED')
                 b['tabs']['detail'].pop('navigation_intent');b['tabs']['detail']['verified_at']=xp.legacy.now()
                 b['tabs']['detail']['last_url']=capture['url']
                 probe={'kind':KIND,'attempt':attempt_ref,'before':before,'after':after,'capture':capture_ref,
-                       'binding_pending':copy.deepcopy(b),'body_read':False,'comments_read':False,
+                       'binding_pending':copy.deepcopy(b),'body_read':False,'cards_read':False,'comments_read':False,
                        'media_read':False,'collection_permitted':False,'navigation_calls':1}
                 probe_ref=manual.evidence(root/'probe.json',probe)
                 b['manual_home_return_pending']=probe_ref;bridge.save_binding(project,name,b)
@@ -184,7 +234,7 @@ def attest(project,name,probe_file,review_file,driver=None):
         # Re-derive the fixed location from the archived original binding, never caller input.
         slot=original['tabs']['detail']
         key=xp.digest({'kind':KIND,'project':str(project),'binding':name,'uid':original['account_uid'],
-            'page':slot['page'],'session':slot['session'],'note':manual.note_id(attempt['target']),
+            'page':slot['page'],'session':slot['session'],'note':target_key(attempt['target']),
             'grant':original['manual_tab_revalidation']})
         nr.require(root==project/'bridge/manual-home-returns'/key and probe_ref==manual.pointer(root/'probe.json')
                    and probe['attempt']==manual.pointer(root/'attempt.json'),'HOME_RETURN_LOCATION_CHANGED')
@@ -196,11 +246,19 @@ def attest(project,name,probe_file,review_file,driver=None):
         old_source=manual.check_pointer(attempt['source'])
         nr.require(old_source.get('url')==attempt['target'],'HOME_RETURN_SOURCE_CHANGED')
         normal_page(old_source)
-        manual.require_capture(old_source,original,manual.proof_args(attempt['target']))
+        require_capture(old_source,original,attempt['target'])
         nr.require(probe['capture']==manual.pointer(root/'capture.json'),'HOME_RETURN_CAPTURE_CHANGED')
         capture=manual.check_pointer(probe['capture']);normal_page(capture)
-        manual.require_capture(capture,b,manual.proof_args(attempt['target']))
-        review,_=nr.read_json(review_file);manual.validate_review(review,{'capture':probe['capture']})
+        require_capture(capture,b,attempt['target'])
+        review,_=nr.read_json(review_file)
+        if target_key(attempt['target']).startswith('author:'):
+            nr.require(review.get('reader')=='codex' and review.get('reviewed') is True
+                       and review.get('cards_read') is True and review.get('body_read') is False
+                       and review.get('capture_sha256')==probe['capture']['sha256']
+                       and review.get('positions')==['/cards'] and isinstance(review.get('summary'),str)
+                       and bool(review['summary'].strip()) and review.get('comments_read') is False
+                       and review.get('media_read') is False,'HOME_RETURN_AUTHOR_REVIEW_REQUIRED')
+        else:manual.validate_review(review,{'capture':probe['capture']})
         with bridge.lease(project,b) as keys:
             nr.require(nr.current_stops(keys)==attempt['stops'],'HOME_RETURN_STOP_CHANGED')
             nr.require(not (root/'attest-attempt.json').exists(),'HOME_RETURN_ATTEST_ALREADY_ATTEMPTED')

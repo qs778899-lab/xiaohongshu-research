@@ -109,6 +109,13 @@ class HomeReturnTests(unittest.TestCase):
         self.assertTrue(self.task_before['payload']['bridge']['hashes']);self.restore()
         self.assertEqual(self.db.task(self.task),self.task_before)
 
+    def test_recommendation_home_requires_exact_observed_url(self):
+        home=helper.HOME+'?channel_id=homefeed_recommend'
+        self.metadata.write_text(json.dumps({'page':self.before['tabs']['detail']['page'],'url':home,'windowId':None}))
+        self.driver.url=home
+        result=self.restore();self.attest(result)
+        self.assertEqual(self.driver.calls.count('navigate'),1);self.unchanged_stops()
+
     def test_exact_normal_home_only_not_404_query_or_other_page(self):
         for url in [helper.HOME+'?source=404',helper.HOME+'/',helper.HOME+'?other=1',self.before['tabs']['detail']['last_url']]:
             with self.subTest(url=url):
@@ -258,6 +265,96 @@ class HomeReturnTests(unittest.TestCase):
         result=self.restore();self.driver.url=helper.HOME
         with self.assertRaises(bridge.BridgeError):self.attest(result)
         self.assertEqual(self.driver.calls.count('navigate'),1);self.assertEqual(bridge.load_binding(self.project,self.name)['state'],'blocked')
+
+
+class AuthorReturnTests(unittest.TestCase):
+    def setUp(self):
+        self.base=HomeReturnTests(methodName='runTest');self.base.setUp()
+        self.addCleanup(self.base.doCleanups);s=self.base
+        self.uid='4'*24;url='https://www.xiaohongshu.com/user/profile/'+self.uid+'?xsec_token=synthetic'
+        self.capture={'stage':'author','uid':s.before['account_uid'],'url':url,
+            'cards':[{'url':'https://www.xiaohongshu.com/user/profile/'+self.uid+'/'+('6'*24),
+                      'text':'Synthetic treatment diary'}]}
+        raw=xp.dumps(self.capture).encode();h=hashlib.sha256(raw).hexdigest()
+        self.source=s.project/'bridge/raw'/(h+'.json');self.source.parent.mkdir(exist_ok=True)
+        self.source.write_bytes(raw)
+        manifest=s.fixture.put('author-task.json',{'units':[{'stage':'author','target':self.uid,
+            'sources':[str(self.source)],'next':'Read related public diaries'}]})
+        s.task=native.import_manifest(s.db,manifest)['task_ids'][0]
+        t=s.db.task(s.task);t['payload']['bridge']={'hashes':[h],'last_snapshot':str(self.source)}
+        s.db.db.execute('UPDATE tasks SET payload=? WHERE id=?',(xp.dumps(t['payload']),s.task));s.db.db.commit()
+        s.task_before=s.db.task(s.task);s.before['tabs']['detail']['last_url']=url
+        bridge.save_binding(s.project,s.name,s.before)
+        home=helper.HOME+'?channel_id=homefeed_recommend'
+        s.metadata.write_text(json.dumps({'page':s.before['tabs']['detail']['page'],'url':home,'windowId':None}))
+        self.rows=[{'event':'unit','task_id':s.task,'snapshot':str(self.source)},
+            {'event':'blocked','reason':'UNEXPECTED_TARGET_CHANGE','processed_units':1,
+             'task_id':s.task,'actor':'codex','metrics':{'calls':11}}]
+        self.write_log()
+        capture=self.capture
+        class AuthorDriver(Driver):
+            def call(self,action,b,role,**kw):
+                if action=='capture':
+                    self.calls.append(action)
+                    if self.fail=='capture_access':raise bridge.BridgeError('ACCESS_STOP')
+                    return copy.deepcopy(capture)
+                return super().call(action,b,role,**kw)
+        s.driver=AuthorDriver();s.driver.url=home
+
+    def write_log(self):
+        self.base.log.write_text('\n'.join(json.dumps(r) for r in self.rows))
+
+    def review(self,result):
+        return self.base.fixture.put('author-return-review.json',{'reader':'codex','reviewed':True,
+            'cards_read':True,'body_read':False,'capture_sha256':result['capture']['sha256'],
+            'summary':'Actually read the returned public diary titles.','positions':['/cards'],
+            'comments_read':False,'media_read':False})
+
+    def test_author_progress_returns_same_page_and_requires_card_review(self):
+        s=self.base;result=s.restore()
+        self.assertEqual(s.db.task(s.task),s.task_before)
+        with self.assertRaisesRegex(bridge.BridgeError,'AUTHOR_REVIEW'):s.attest(result)
+        outcome=s.attest(result,self.review(result))
+        self.assertFalse(outcome['new_grant']);self.assertEqual(outcome['tasks_completed'],0)
+        self.assertEqual(s.driver.calls.count('navigate'),1);s.unchanged_stops()
+
+    def test_unregistered_progress_cannot_authorize_return(self):
+        self.rows[0]['snapshot']=str(self.source.with_name('5'*64+'.json'));self.write_log()
+        with self.assertRaisesRegex(bridge.BridgeError,'AUTHOR_PROGRESS'):self.base.restore()
+        self.assertEqual(self.base.driver.calls,[])
+
+    def test_progress_count_and_task_must_match(self):
+        self.rows[-1]['processed_units']=2;self.write_log()
+        with self.assertRaisesRegex(bridge.BridgeError,'AUTHOR_PROGRESS'):self.base.restore()
+        self.assertEqual(self.base.driver.calls,[])
+
+    def test_changed_archive_rejects_before_browser(self):
+        self.source.write_bytes(self.source.read_bytes()+b' ')
+        with self.assertRaises(xp.legacy.ResearchError):self.base.restore()
+        self.assertEqual(self.base.driver.calls,[])
+
+    def test_extra_home_query_rejects_before_navigation(self):
+        meta=json.loads(self.base.metadata.read_text());meta['url']+='&extra=1'
+        self.base.metadata.write_text(json.dumps(meta));self.base.driver.url=meta['url']
+        with self.assertRaisesRegex(bridge.BridgeError,'EXACT_HOME'):self.base.restore()
+        self.assertEqual(self.base.driver.calls,[])
+
+    def test_changed_author_capture_remains_blocked(self):
+        self.capture['cards'][0]['url']=self.capture['cards'][0]['url'].replace(self.uid,'7'*24)
+        with self.assertRaisesRegex(bridge.BridgeError,'AUTHOR_CAPTURE'):self.base.restore()
+        self.assertEqual(self.base.driver.calls.count('navigate'),1);self.base.unchanged_stops()
+
+    def test_author_access_stop_revokes_existing_grant(self):
+        self.base.driver.fail='capture_access'
+        with self.assertRaises(xp.legacy.ResearchError):self.base.restore()
+        for key,old in self.base.stops.items():
+            self.assertNotEqual((identity.guard_directory(key)/'STOP.json').read_bytes(),old)
+
+    def test_unknown_author_navigation_not_replayed(self):
+        s=self.base;s.driver.fail='unknown'
+        with self.assertRaises(bridge.BridgeError):s.restore()
+        with self.assertRaises(bridge.BridgeError):s.restore()
+        self.assertEqual(s.driver.calls.count('navigate'),1);s.unchanged_stops()
 
 
 if __name__=='__main__':unittest.main()
