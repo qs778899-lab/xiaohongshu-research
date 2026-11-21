@@ -123,7 +123,36 @@ def restore_source(project,b,target):
     raise bridge.BridgeError('HOME_RETURN_OBSERVED_NORMAL_NOTE_REQUIRED')
 
 
-def observed_failure(metadata,log,task,b):
+def previous_author_task(project,b,task):
+    """Freeze a reviewed author scope; returning there never resumes its pagination."""
+    target=b['tabs']['detail']['last_url']
+    if not target_key(target).startswith('author:') or task['payload']['stage']=='author':
+        return None
+    nr.require(task['payload']['stage'] in {'body','roots','replies'},
+               'HOME_RETURN_PRE_NAVIGATION_FAILURE_REQUIRED')
+    previous=b.get('last_success',{}).get('task')
+    nr.require(isinstance(previous,str) and previous and previous!=task['id'],
+               'HOME_RETURN_REVIEWED_AUTHOR_REQUIRED')
+    author=task_snapshot(project,previous);state=author['payload'].get('bridge',{})
+    nr.require(author['payload'].get('stage')=='author'
+               and target_key(target)=='author:'+author['payload'].get('target',''),
+               'HOME_RETURN_REVIEWED_AUTHOR_REQUIRED')
+    known=state.get('hashes');reviewed=state.get('reviewed_hashes')
+    nr.require(isinstance(known,list) and known and isinstance(reviewed,list)
+               and all(isinstance(h,str) and re.fullmatch('[a-f0-9]{64}',h) for h in known)
+               and set(known)<=set(reviewed) and state.get('awaiting_review') is False
+               and state.get('last_review_event'),'HOME_RETURN_REVIEWED_AUTHOR_REQUIRED')
+    path=Path(state.get('last_snapshot',''));h=path.stem
+    nr.require(path in {Path(project)/'bridge/raw'/(h+'.json'),Path(project)/'native-sources'/h}
+               and h in known and h in reviewed and path.is_file() and not path.is_symlink(),
+               'HOME_RETURN_REVIEWED_AUTHOR_REQUIRED')
+    value,_=nr.read_json(path,h)
+    nr.require(value.get('url')==target,'HOME_RETURN_REVIEWED_AUTHOR_REQUIRED')
+    require_capture(value,b,target)
+    return author
+
+
+def observed_failure(metadata,log,task,b,previous_author=None):
     slot=b['tabs']['detail']
     bridge.safe_url(metadata.get('url'))
     nr.require(metadata.get('url') in HOMES and metadata.get('page')==slot['page']
@@ -132,9 +161,24 @@ def observed_failure(metadata,log,task,b):
                and log.get('task_id')==task['id'] and log.get('actor')=='codex',
                'HOME_RETURN_PRE_NAVIGATION_FAILURE_REQUIRED')
     if task['payload']['stage']!='author':
-        nr.require(not target_key(slot['last_url']).startswith('author:')
-                   and log.get('processed_units')==0 and log.get('metrics',{}).get('calls')==1,
-                   'HOME_RETURN_PRE_NAVIGATION_FAILURE_REQUIRED')
+        calls=log.get('metrics',{}).get('calls')
+        if target_key(slot['last_url']).startswith('author:'):
+            # work() may make one additional metadata-only owned-home check.
+            # A verified manual tab has owned=False, so that branch cannot navigate.
+            authorization=b.get('allow_home_restore',{})
+            fallback=(calls==2 and isinstance(authorization,dict)
+                      and isinstance(authorization.get('authorization'),str)
+                      and bool(authorization['authorization'].strip()) and slot.get('owned') is False)
+            nr.require(task['payload']['stage'] in {'body','roots','replies'}
+                       and previous_author and previous_author['id']==b.get('last_success',{}).get('task')
+                       and previous_author['payload'].get('stage')=='author'
+                       and target_key(slot['last_url'])=='author:'+previous_author['payload'].get('target','')
+                       and type(log.get('processed_units')) is int and log['processed_units']==0
+                       and not log.get('prior_units') and type(calls) is int and (calls==1 or fallback),
+                       'HOME_RETURN_PRE_NAVIGATION_FAILURE_REQUIRED')
+        else:
+            nr.require(log.get('processed_units')==0 and calls==1,
+                       'HOME_RETURN_PRE_NAVIGATION_FAILURE_REQUIRED')
     else:
         prior=log.get('prior_units',[]);state=task['payload'].get('bridge',{})
         nr.require(target_key(slot['last_url'])=='author:'+task['payload']['target']
@@ -180,11 +224,15 @@ def restore(project,name,task_id,metadata_file,log_file,authorization,driver=Non
         b,target,root=context(project,name);original=copy.deepcopy(b)
         nr.require(not (root/'attempt.json').exists(),'HOME_RETURN_ALREADY_ATTEMPTED')
         task=task_snapshot(project,task_id);metadata,_=nr.read_json(metadata_file)
-        log,log_ref=failure_log(log_file);observed_failure(metadata,log,task,b)
+        log,log_ref=failure_log(log_file);previous_author=previous_author_task(project,b,task)
+        observed_failure(metadata,log,task,b,previous_author)
         with bridge.lease(project,b) as keys:
-            stops=nr.current_stops(keys);source=restore_source(project,b,target)
+            stops=nr.current_stops(keys)
+            source=(manual.pointer(previous_author['payload']['bridge']['last_snapshot'])
+                    if previous_author else restore_source(project,b,target))
             attempt={'kind':KIND,'at':xp.legacy.now(),'project':str(project),'binding':original,
-                'target':target,'source':source,'task':task,'metadata':manual.pointer(metadata_file),
+                'target':target,'source':source,'task':task,'previous_author_task':previous_author,
+                'metadata':manual.pointer(metadata_file),
                 'failure_log':log_ref,'stops':stops,'authorization':authorization,
                 'scope':'same_manual_tab_normal_home_return_under_existing_grant'}
             attempt_ref=manual.evidence(root/'attempt.json',attempt)
@@ -242,7 +290,9 @@ def attest(project,name,probe_file,review_file,driver=None):
                    and b['manual_tab_revalidation']==original['manual_tab_revalidation'],'HOME_RETURN_AUTHORITY_CHANGED')
         nr.require(task_snapshot(project,attempt['task']['id'])==attempt['task'],'HOME_RETURN_TASK_CHANGED')
         log,_=failure_log(attempt['failure_log']['file'],attempt['failure_log']['sha256'])
-        observed_failure(manual.check_pointer(attempt['metadata']),log,attempt['task'],original)
+        previous_author=previous_author_task(project,original,attempt['task'])
+        nr.require(previous_author==attempt.get('previous_author_task'),'HOME_RETURN_PREVIOUS_AUTHOR_CHANGED')
+        observed_failure(manual.check_pointer(attempt['metadata']),log,attempt['task'],original,previous_author)
         old_source=manual.check_pointer(attempt['source'])
         nr.require(old_source.get('url')==attempt['target'],'HOME_RETURN_SOURCE_CHANGED')
         normal_page(old_source)

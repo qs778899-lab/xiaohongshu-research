@@ -374,4 +374,148 @@ class AuthorReturnTests(unittest.TestCase):
         self.assertEqual(s.driver.calls.count('navigate'),1);s.unchanged_stops()
 
 
+class TaskSwitchAuthorReturnTests(unittest.TestCase):
+    def setUp(self):
+        self.author=AuthorReturnTests(methodName='runTest');self.author.setUp()
+        self.addCleanup(self.author.doCleanups);s=self.base=self.author.base
+        self.author_task=s.task
+        old=s.db.task(self.author_task);state=old['payload']['bridge']
+        state.update(reviewed_hashes=list(state['hashes']),awaiting_review=False,last_review_event='7'*64,
+                     cursor={'scrollTop':1200},fault={'code':'PAGINATION_STALLED','hold':True,
+                                                   'recovery':{'exhausted':True}})
+        s.db.db.execute('UPDATE tasks SET payload=?,reason=? WHERE id=?',
+                        (xp.dumps(old['payload']),'PAGINATION_STALLED',self.author_task));s.db.db.commit()
+        self.author_before=s.db.task(self.author_task)
+        self.set_task('roots')
+        s.before['last_success']={'task':self.author_task,'at':xp.legacy.now()}
+        s.before['allow_home_restore']={'authorization':'Previously authorized normal-page returns.'}
+        bridge.save_binding(s.project,s.name,s.before)
+        self.write_failure(2)
+
+    def set_task(self,stage):
+        s=self.base;target='5'*24
+        source=s.fixture.put('next-note-source.json',{'url':'https://www.xiaohongshu.com/explore/'+target})
+        unit={'stage':stage,'target':target,'sources':[str(source)],'next':'Read selected public note scope'}
+        if stage=='search':unit['sort']='general'
+        manifest=s.fixture.put('next-note-task.json',{'units':[unit]})
+        s.task=native.import_manifest(s.db,manifest)['task_ids'][0];s.task_before=s.db.task(s.task)
+
+    def write_failure(self,calls,**extra):
+        s=self.base
+        value={'event':'blocked','reason':'UNEXPECTED_TARGET_CHANGE','processed_units':0,
+               'task_id':s.task,'actor':'codex','metrics':{'calls':calls}}
+        value.update(extra);s.log.write_text(json.dumps(value))
+
+    def save_author(self,task):
+        s=self.base;s.db.db.execute('UPDATE tasks SET payload=? WHERE id=?',
+            (xp.dumps(task['payload']),self.author_task));s.db.db.commit()
+
+    def test_return_for_note_text_stages_freezes_author_hold_and_never_advances_it(self):
+        for stage in ['body','roots','replies']:
+            with self.subTest(stage=stage):
+                case=TaskSwitchAuthorReturnTests();case.setUp()
+                try:
+                    s=case.base;case.set_task(stage);case.write_failure(2)
+                    result=s.restore();attempt=manual.check_pointer(manual.check_pointer(result['probe'])['attempt'])
+                    self.assertEqual(attempt['previous_author_task'],case.author_before)
+                    outcome=s.attest(result,case.author.review(result))
+                    self.assertEqual(s.db.task(case.author_task),case.author_before)
+                    self.assertEqual(s.db.task(s.task),s.task_before)
+                    self.assertEqual(outcome['tasks_completed'],0);self.assertFalse(outcome['new_grant'])
+                    self.assertEqual(s.driver.calls.count('navigate'),1);self.assertNotIn('advance',s.driver.calls)
+                    self.assertEqual(bridge.load_binding(s.project,s.name)['manual_tab_revalidation'],s.before['manual_tab_revalidation'])
+                    s.unchanged_stops()
+                finally:case.doCleanups()
+
+    def test_one_metadata_call_does_not_need_owned_home_fallback_authorization(self):
+        s=self.base;b=bridge.load_binding(s.project,s.name);b.pop('allow_home_restore');bridge.save_binding(s.project,s.name,b)
+        self.write_failure(1);result=s.restore();s.attest(result,self.author.review(result));s.unchanged_stops()
+
+    def test_two_calls_require_saved_nonempty_fallback_authorization(self):
+        for authorization in [None,{},'text',{'authorization':''},{'authorization':'  '}]:
+            with self.subTest(authorization=authorization):
+                s=self.base;b=copy.deepcopy(s.before);b['allow_home_restore']=authorization
+                bridge.save_binding(s.project,s.name,b)
+                with self.assertRaisesRegex(bridge.BridgeError,'PRE_NAVIGATION'):s.restore()
+                self.assertEqual(s.driver.calls,[])
+
+    def test_metrics_units_or_prior_unit_cannot_hide_other_operations(self):
+        for calls in [0,3,True,2.0,'2']:
+            self.write_failure(calls)
+            with self.assertRaisesRegex(bridge.BridgeError,'PRE_NAVIGATION'):self.base.restore()
+        self.write_failure(2,processed_units=1)
+        with self.assertRaisesRegex(bridge.BridgeError,'PRE_NAVIGATION'):self.base.restore()
+        self.write_failure(2);raw=self.base.log.read_text()
+        self.base.log.write_text(json.dumps({'event':'unit','task_id':self.base.task,'snapshot':str(self.author.source)})+'\n'+raw)
+        with self.assertRaisesRegex(bridge.BridgeError,'PRE_NAVIGATION'):self.base.restore()
+        self.assertEqual(self.base.driver.calls,[])
+
+    def test_unreviewed_or_pending_author_archive_rejects_before_browser(self):
+        for mutate in ['unread','awaiting','last_review','wrong_target','last_snapshot']:
+            with self.subTest(mutate=mutate):
+                old=copy.deepcopy(self.author_before);state=old['payload']['bridge']
+                if mutate=='unread':state['reviewed_hashes']=[]
+                if mutate=='awaiting':state['awaiting_review']=True
+                if mutate=='last_review':state.pop('last_review_event')
+                if mutate=='wrong_target':old['payload']['target']='8'*24
+                if mutate=='last_snapshot':state['last_snapshot']=str(self.author.source.with_name('8'*64+'.json'))
+                self.save_author(old)
+                with self.assertRaisesRegex(bridge.BridgeError,'REVIEWED_AUTHOR'):self.base.restore()
+                self.assertEqual(self.base.driver.calls,[])
+        self.save_author(self.author_before)
+
+    def test_changed_source_hash_or_missing_last_success_rejects_before_browser(self):
+        s=self.base;b=copy.deepcopy(s.before);b['last_success']['task']=s.task;bridge.save_binding(s.project,s.name,b)
+        with self.assertRaisesRegex(bridge.BridgeError,'REVIEWED_AUTHOR'):s.restore()
+        bridge.save_binding(s.project,s.name,s.before)
+        self.author.source.write_bytes(self.author.source.read_bytes()+b' ')
+        with self.assertRaises(xp.legacy.ResearchError):s.restore()
+        self.assertEqual(s.driver.calls,[])
+
+    def test_unsupported_stages_do_not_share_task_switch_exception(self):
+        for stage in ['search','images','video']:
+            self.set_task(stage);self.write_failure(2)
+            with self.assertRaisesRegex(bridge.BridgeError,'PRE_NAVIGATION'):self.base.restore()
+        self.assertEqual(self.base.driver.calls,[])
+
+    def test_inflight_navigation_and_new_stop_still_reject(self):
+        s=self.base;b=copy.deepcopy(s.before);b['tabs']['detail']['navigation_intent']={'url':helper.HOME}
+        bridge.save_binding(s.project,s.name,b)
+        with self.assertRaisesRegex(bridge.BridgeError,'INFLIGHT'):s.restore()
+        bridge.save_binding(s.project,s.name,s.before)
+        path=identity.guard_directory(s.keys[0])/'STOP.json';path.write_bytes(path.read_bytes()+b' ')
+        with self.assertRaises(xp.legacy.StopRun):s.restore()
+        self.assertEqual(s.driver.calls,[])
+
+    def test_author_state_changed_after_return_cannot_attest(self):
+        s=self.base;result=s.restore();old=copy.deepcopy(self.author_before)
+        old['payload']['bridge']['cursor']['scrollTop']=1400;self.save_author(old)
+        before=list(s.driver.calls)
+        with self.assertRaisesRegex(bridge.BridgeError,'PREVIOUS_AUTHOR_CHANGED'):s.attest(result,self.author.review(result))
+        self.assertEqual(s.driver.calls,before);self.assertEqual(bridge.load_binding(s.project,s.name)['state'],'blocked')
+        s.unchanged_stops()
+
+    def test_two_call_batch_is_only_metadata_then_rejected_owned_home_probe(self):
+        s=self.base
+        class MetadataDriver(Driver):
+            def __init__(self):
+                super().__init__();self.url=helper.HOME+'?channel_id=homefeed_recommend'
+                self.metrics={'calls':0,'process_starts':1,'elapsed_seconds':0}
+            def call(self,action,b,role,**kw):
+                self.metrics['calls']+=1
+                if action!='metadata':raise AssertionError('Unexpected action: '+action)
+                return super().call(action,b,role,**kw)
+            def close(self):pass
+        driver=MetadataDriver();b=copy.deepcopy(s.before);b['state']='ready';b.pop('last_error')
+        bridge.save_binding(s.project,s.name,b)
+        with patch.object(bridge,'Driver',return_value=driver):
+            result=bridge.work(s.project,s.name,units=1,max_seconds=10,interval=3,
+                               task_ids=[s.task],home_restore_authorization='Existing return authorization')
+        self.assertEqual(result['event'],'blocked');self.assertEqual(result['reason'],'UNEXPECTED_TARGET_CHANGE')
+        self.assertEqual(result['processed_units'],0);self.assertEqual(result['metrics']['calls'],2)
+        self.assertEqual(driver.calls,['metadata','metadata'])
+        self.assertNotIn('navigation_intent',bridge.load_binding(s.project,s.name)['tabs']['detail'])
+        self.assertEqual(s.db.task(self.author_task),self.author_before);s.unchanged_stops()
+
+
 if __name__=='__main__':unittest.main()
