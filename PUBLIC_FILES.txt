@@ -183,3 +183,8 @@ scripts/test_person_routes.py
 scripts/test_manual_search_confirmation.py
 scripts/xhs_manual_home_return.py
 scripts/test_manual_home_return.py
+scripts/xhs_note_link_return.py
+scripts/xhs_note_link_return.mjs
+scripts/test_note_link_return.py
+scripts/test_note_link_return.mjs
+references/note-link-validation.md
