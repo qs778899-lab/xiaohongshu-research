@@ -1266,6 +1266,72 @@ await vm.runInNewContext(buildDeepExtractor(buildCommentsExtractJs, {
 }), automaticStall.context);
 assert.equal(automaticStall.state.clicks, 0, 'Automatic batches leave stalled threads for explicit review');
 
+// A current expander invalidates inherited completion even when its replies
+// were captured in an earlier document. Cached text is retained, not counted
+// as a fresh rendering of those hidden replies.
+function completedReplyFixture(options = {}) {
+  const f = fixture(false, {realIds: true, advancingClock: true, ...options});
+  const queryAll = f.context.document.querySelectorAll;
+  f.context.document.querySelectorAll = selector => selector.includes('.comments-container .end-container')
+    ? [new f.context.HTMLElement('THE END')] : queryAll(selector);
+  f.state.replies = 3;
+  return f;
+}
+{
+  const f = completedReplyFixture();
+  const first = await bridgeRead(f);
+  assert.equal(first.deepCoverage.threads[0].state, 'visible_replies_read');
+  const progress = savedProgress(first), key = first.deepCoverage.threads[0].rootKey;
+  const bodies = JSON.stringify(progress.threads[key].replyBodyCaptures);
+  f.state.replies = 1;
+  const reopened = await bridgeRead(f, progress);
+  assert.equal(f.state.clicks, 1, 'A freshly visible safe control reopens inherited completion');
+  assert.equal(reopened.deepCoverage.threads[0].reopenedBy, 'observed_reply_expander');
+  assert.equal(Object.keys(reopened.deepCoverage.threads[0].replyBodyCaptures).length, 3, 'Historical bodies are not discarded');
+  assert.equal(JSON.stringify(progress.threads[key].replyBodyCaptures), bodies, 'Input evidence is not mutated');
+  assert.ok(reopened.deepCoverage.remainingThreads.length, 'Root END cannot complete a currently expandable thread');
+  f.state.now += 4000;
+  const next = await bridgeRead(f, savedProgress(reopened));
+  assert.equal(f.state.clicks, 2, 'Continuation can reach the next current reply page');
+  f.state.now += 4000;
+  const end = await bridgeRead(f, savedProgress(next));
+  assert.equal(f.state.clicks, 2, 'After real rendering ends there is no duplicate expansion');
+  assert.equal(end.results.filter(row => row.is_reply).length, 3);
+  assert.equal(end.deepCoverage.remainingThreads.length, 0);
+}
+{
+  const f = completedReplyFixture();
+  const initial = await bridgeRead(f);
+  const same = await bridgeRead(f, savedProgress(initial));
+  assert.equal(f.state.clicks, 0, 'A current non-expandable read floor remains reusable');
+  assert.equal(same.deepCoverage.threads[0].state, 'previously_read');
+}
+{
+  const f = completedReplyFixture();
+  const initial = await bridgeRead(f);f.state.replies = 1;
+  const bounded = await bridgeRead(f, savedProgress(initial), {maxReplyClicks: 0});
+  assert.equal(f.state.clicks, 0, 'Reopening does not override click budgets');
+  assert.ok(bounded.deepCoverage.remainingThreads.length);
+}
+{
+  const f = completedReplyFixture({linkExpander: true});
+  const initial = await bridgeRead(f);f.state.replies = 1;
+  const unsafe = await bridgeRead(f, savedProgress(initial));
+  assert.equal(f.state.clicks, 0, 'An expander-shaped link remains forbidden after historical completion');
+  assert.equal(unsafe.deepCoverage.threads[0].reason, 'unsafe_expander_not_clicked');
+  assert.ok(unsafe.deepCoverage.remainingThreads.length);
+}
+{
+  const f = completedReplyFixture({deferReplies: true});
+  const initial = await bridgeRead(f);f.state.replies = 1;
+  const submitted = await bridgeRead(f, savedProgress(initial));
+  const oldIntent = submitted.deepCoverage.threads[0].pendingReplyExpansion.clickedAt;
+  f.state.now += 4000;
+  const pending = await bridgeRead(f, savedProgress(submitted));
+  assert.equal(f.state.clicks, 1, 'Unknown reply rendering must never replay the click');
+  assert.equal(pending.deepCoverage.threads[0].pendingReplyExpansion.clickedAt, oldIntent);
+}
+
 const growing = manyRootsFixture(1);
 const growingId = growing.ids[0];
 await vm.runInNewContext(buildDeepExtractor(buildCommentsExtractJs, {
@@ -1279,6 +1345,13 @@ assert.equal(growing.clickedIds.length, 1, 'Fresh API reply count growth reopens
 // Root 21 is still unfinished: history must not terminate this pass at screen 1.
 for (const uiTotal of [35, 0]) {
 const pagedResume = manyRootsFixture(35);
+// The already-complete prefix has no current expansion controls. A visible
+// control is a new obligation and is covered by the reopening tests above.
+pagedResume.parents.forEach((parent, i) => {
+  if (i === 20) return;
+  const query = parent.querySelectorAll;
+  parent.querySelectorAll = selector => selector.startsWith('button') ? [] : query(selector);
+});
 let visibleRoots = 10, resumeScrolls = 0;
 const resumeScroller = {tagName:'DIV',className:'note-scroller',scrollHeight:5000,clientHeight:400,clientWidth:300,
   getBoundingClientRect:()=>({top:20,left:10,width:300,height:400,bottom:420,right:310}),scrollTo() {

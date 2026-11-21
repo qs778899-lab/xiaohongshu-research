@@ -443,6 +443,13 @@ async function readRenderedBatch(options) {
       thread.visibleReplies = replies.length;
       thread.expanders = replyExpanders(p).map(clean);
       thread.unsafeExpanders = unsafeExpanderCounts.get(p) || 0;
+      // Historical capture remains valid evidence, but it cannot complete a
+      // newly folded/currently expandable floor. Preserve old bodies and any
+      // pending click; normal pacing and parent-discovery deferral still apply.
+      if (thread.state === 'previously_read' && (thread.expanders.length || thread.unsafeExpanders)) {
+        thread.state = 'not_processed';
+        thread.reopenedBy = thread.expanders.length ? 'observed_reply_expander' : 'unsafe_expander_requires_review';
+      }
       threads.set(rootKey, thread);
       if (commentId) previousObserved.add(commentId);
       seenInPass.add(rootKey);
