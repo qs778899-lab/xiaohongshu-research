@@ -164,6 +164,23 @@ def completed_preparation(record, keys):
     result, _ = nr.read_json(done)
     inspected = manual.check_pointer(result['inspection'])
     grant_file = Path(result['inspection']['file']).parent / 'grant.json'
+    if not grant_file.exists() and record.with_suffix('.replacement.json').exists():
+        marker,_=nr.read_json(record.with_suffix('.replacement.json'))
+        replacement=manual.check_pointer(marker['intent'])
+        nr.require(replacement.get('inspection')==result['inspection']
+                   and replacement.get('original_record')==manual.pointer(record), 'PROJECT_TAB_REPLACEMENT_CHANGED')
+        _,attempt,_,checked_record,folder=missing_presearch_archive(inspected['binding']['project'],result['inspection']['file'])
+        nr.require(checked_record==record and replacement['stops']==attempt['stops']==nr.current_stops(keys),
+                   'PROJECT_TAB_REPLACEMENT_CHANGED')
+        replacement_folder=folder/'presearch-home-replacement'
+        nr.require(Path(marker['intent']['file'])==replacement_folder/'intent.json', 'PROJECT_TAB_REPLACEMENT_CHANGED')
+        result,_=nr.read_json(replacement_folder/'done.json')
+        nr.require(result.get('intent')==marker['intent'], 'PROJECT_TAB_REPLACEMENT_CHANGED')
+        inspected=manual.check_pointer(result['inspection'])
+        new_attempt=manual.check_pointer(inspected['attempt'])
+        new_user=manual.check_pointer(new_attempt['user'])
+        nr.require(new_user.get('presearch_replacement')==marker['intent'], 'PROJECT_TAB_REPLACEMENT_CHANGED')
+        grant_file=Path(result['inspection']['file']).parent/'grant.json'
     nr.require(grant_file.exists(), 'PROJECT_TAB_FRESH_ATTESTATION_REQUIRED')
     grant, _ = nr.read_json(grant_file)
     b = bridge.load_binding(inspected['binding']['project'], grant['authority']['binding_name'])
@@ -201,7 +218,7 @@ def prepare(project, parent_project, binding, authorization, creator=create_home
         if renewal:
             nr.require(not (folder/'intent.json').exists(), 'PROJECT_TAB_ALREADY_ATTEMPTED')
         for old in root.glob('*.json'):
-            if old.name.endswith('.done.json'):continue
+            if old.name.endswith(('.done.json', '.replacement.json')):continue
             value,_=nr.read_json(old)
             prior_parent = manual.check_pointer(value['parent'])
             if (value.get('context_id')==parent['context_id']
@@ -254,13 +271,178 @@ def prepare(project, parent_project, binding, authorization, creator=create_home
     return dict(result,new_project_tab=True,fresh_search_and_body_required=True)
 
 
+def missing_presearch_archive(project, inspection_file):
+    """Validate a completed home inspection whose first metadata read failed.
+
+    No search action may have reached the page. This is not permission to
+    retry a navigation, verification failure, or unknown creation result.
+    """
+    project = Path(project).resolve(); inspection_file = Path(inspection_file).resolve()
+    root = inspection_file.parent
+    nr.require(root.parent == project / 'bridge/manual-tab-recoveries'
+               and inspection_file.name == 'inspection.json', 'PROJECT_TAB_REPLACEMENT_LOCATION_CHANGED')
+    inspected = manual.check_pointer(manual.pointer(inspection_file))
+    attempt = manual.check_pointer(inspected['attempt'])
+    parent = manual.check_pointer(attempt['parent'])
+    user = manual.check_pointer(attempt['user'])
+    target = manual.active_metadata(manual.check_pointer(attempt['metadata']))
+    candidate = inspected['binding']; loaded = manual.check_pointer(inspected['capture'])
+    nr.require(inspected.get('kind') == manual.KIND and not inspected.get('initial_inspection')
+               and inspected.get('collection_permitted') is False
+               and attempt['project'] == str(project) == candidate['project']
+               and target == attempt['target'] and target['url'] == HOME
+               and attempt['args'] == manual.proof_args(HOME), 'PROJECT_TAB_ORIGINAL_HOME_REQUIRED')
+    manual.require_capture(loaded, candidate, manual.proof_args(HOME))
+    nr.require(loaded.get('url') == HOME, 'PROJECT_TAB_ORIGINAL_HOME_REQUIRED')
+    for field in ('context_id', 'account_uid', 'profile_guard_key', 'profile_label', 'runtime'):
+        nr.require(candidate.get(field) == parent.get(field), 'PROJECT_TAB_PARENT_CHANGED')
+    key = xp.digest({'stops': attempt['stops'], 'context': parent['context_id'], 'tabId': target['tabId']})
+    nr.require(root.name == key, 'MANUAL_ATTEMPT_LOCATION_CHANGED')
+    reservation_file = xp.legacy.account_root() / 'manual-tab-attempts' / (key + '.json')
+    nr.require(Path(attempt['account_attempt']['file']).resolve() == reservation_file.resolve(),
+               'MANUAL_RESERVATION_LOCATION_CHANGED')
+    reservation = manual.check_pointer(attempt['account_attempt'])
+    nr.require(reservation.get('project') == str(project) and reservation.get('stops') == attempt['stops']
+               and reservation.get('tab_id') == target['tabId']
+               and reservation.get('context_id') == parent['context_id'], 'MANUAL_ATTEMPT_CHANGED')
+    for ref in attempt['frozen_stops'].values(): manual.check_pointer(ref)
+    adopted, _ = nr.read_json(root / 'adopted.json')
+    expected=json.loads(json.dumps(attempt['candidate']))
+    for slot in expected['tabs'].values(): slot['page']=adopted.get('page')
+    nr.require(candidate==expected and candidate['session']=='xhs-manual-'+key[:24]
+               and candidate['binding_name']=='manual-'+key[:24], 'MANUAL_CANDIDATE_CHANGED')
+    nr.require(set(candidate.get('tabs', {})) == {'search', 'detail'}
+               and candidate.get('transport_surface') == 'browser' and candidate.get('manual_single_tab') is True,
+               'MANUAL_TRANSPORT_CHANGED')
+    for slot in candidate['tabs'].values():
+        nr.require(slot.get('chrome_tab_id') == target['tabId'] and slot.get('window_id') == target['windowId']
+                   and slot.get('page') == adopted.get('page') == loaded.get('page')
+                   and slot.get('last_url') == HOME and slot.get('owned') is False,
+                   'PROJECT_TAB_ATTESTATION_TARGET_CHANGED')
+    intent_ref = user.get('preparation', {})
+    intent = manual.check_pointer(intent_ref)
+    folder = Path(intent_ref['file']).parent
+    nr.require(Path(intent_ref['file']).name == 'intent.json'
+               and (folder == project / 'bridge/project-tab-preparation'
+                    or folder.parent == project / 'bridge/project-tab-renewals'),
+               'PROJECT_TAB_ORIGINAL_PREPARATION_REQUIRED')
+    nr.require(intent['project'] == str(project) and intent['stops'] == attempt['stops']
+               and manual.check_pointer(intent['parent']) == parent
+               and intent['authorization'] == user.get('user_statement'), 'PROJECT_TAB_PREPARATION_CHANGED')
+    created, _ = nr.read_json(folder / 'created.json')
+    nr.require(created == target, 'PROJECT_TAB_PREPARATION_CHANGED')
+    record_key = {'context': parent['context_id'], 'project': str(project)}
+    if intent.get('renewal'): record_key['renewal'] = intent['renewal']
+    record = xp.legacy.account_root() / 'project-tab-preparations' / (xp.digest(record_key) + '.json')
+    registered, _ = nr.read_json(record)
+    done, _ = nr.read_json(record.with_suffix('.done.json'))
+    nr.require(registered == intent and done.get('inspection') == manual.pointer(inspection_file),
+               'PROJECT_TAB_PREPARATION_CHANGED')
+    failure, _ = nr.read_json(root / 'search-failure.json')
+    search_attempt, _ = nr.read_json(root / 'search-attempt.json')
+    nr.require(failure.get('error') == 'TARGET_MISSING' and failure.get('collection_permitted') is False
+               and search_attempt.get('inspection') == manual.pointer(inspection_file)
+               and search_attempt.get('scope') == 'one_existing_query_health_check_only'
+               and nr.stamp(failure['at']) >= nr.stamp(search_attempt['at']) >= nr.stamp(inspected['at']),
+               'PROJECT_TAB_PRESEARCH_MISSING_REQUIRED')
+    forbidden = ('search-before.json', 'search-navigation.json', 'search-probe.json', 'note-attempt.json', 'grant.json')
+    nr.require(not any((root / n).exists() for n in forbidden)
+               and not list(root.glob('search-metadata-*.json'))
+               and not list(root.glob('search-capture-*.json'))
+               and not list(root.glob('*continuation*.json')), 'PROJECT_TAB_SEARCH_MAY_HAVE_PROGRESS')
+    return inspected, attempt, parent, record, folder
+
+
+def replace_missing_presearch_home(project, parent_project, binding, authorization, inspection_file, creator=create_home):
+    """One replacement after exact absence, retaining the original reservation."""
+    project = Path(project).resolve(); parent_project = Path(parent_project).resolve()
+    xp.legacy.research_path(project)
+    nr.require(project != parent_project, 'DISTINCT_PROJECT_REQUIRED')
+    nr.require(isinstance(authorization, str) and authorization.strip(), 'AUTHORIZATION_BASIS_REQUIRED')
+    inspected, attempt, original_parent, record, original_folder = missing_presearch_archive(project, inspection_file)
+    parent = bridge.load_binding(parent_project, binding)
+    for field in ('context_id', 'account_uid', 'profile_guard_key', 'profile_label', 'runtime'):
+        nr.require(parent.get(field) == original_parent.get(field), 'PROJECT_TAB_PARENT_CHANGED')
+    nr.require(str(parent_project) == attempt['parent_project'], 'PROJECT_TAB_PARENT_CHANGED')
+    folder = original_folder / 'presearch-home-replacement'
+    marker = record.with_suffix('.replacement.json')
+    nr.require(not marker.exists() and not (folder / 'intent.json').exists(), 'PROJECT_TAB_REPLACEMENT_ALREADY_ATTEMPTED')
+    with bridge.lease(parent_project, parent) as keys:
+        nr.require(nr.current_stops(keys) == attempt['stops'], 'PROJECT_TAB_STOP_CHANGED')
+        # No other unfinished preparation may be escaped by this continuation.
+        for old in record.parent.glob('*.json'):
+            if old == record or old.name.endswith(('.done.json', '.replacement.json')): continue
+            value, _ = nr.read_json(old)
+            old_parent = manual.check_pointer(value['parent'])
+            if value.get('context_id') == parent['context_id'] or old_parent.get('account_uid') == parent['account_uid']:
+                completed_preparation(old, keys)
+        driver = bridge.Driver(parent['runtime'])
+        try:
+            missing = inspected['binding']
+            lease = driver.call('lease_status', missing, 'detail')
+            nr.require(lease.get('matching') == 0 and lease.get('leaseTabCount') == 0,
+                       'PROJECT_TAB_EXACT_ABSENCE_REQUIRED')
+            absent = driver.call('probe_registered_target', missing, 'detail')
+            nr.require(absent == {'state': 'registered_target_absent', 'page': missing['tabs']['detail']['page']},
+                       'PROJECT_TAB_EXACT_ABSENCE_REQUIRED')
+            meta = driver.call('metadata', parent, 'detail'); ident = driver.call('identity', parent, 'detail')
+            slot = parent['tabs']['detail']
+            nr.require(meta.get('page') == slot['page'] == ident.get('page')
+                       and ident.get('uid') == parent['account_uid'] and ident.get('url') == meta.get('url'),
+                       'PROJECT_TAB_PARENT_CHANGED')
+            bridge.safe_url(meta['url'])
+            nr.require(nr.current_stops(keys) == attempt['stops'], 'PROJECT_TAB_STOP_CHANGED')
+            folder.mkdir(parents=True, exist_ok=True)
+            intent = {'kind': 'project_tab_presearch_replacement_v1', 'at': xp.legacy.now(),
+                      'inspection': manual.pointer(inspection_file), 'original_record': manual.pointer(record),
+                      'stops': attempt['stops'], 'authorization': authorization,
+                      'parent': manual.evidence(folder / 'parent.json', parent),
+                      'exact_absence': absent, 'lease_status': lease, 'parent_identity': ident}
+            # Both durable and shared-account records prevent a second creation.
+            manual.evidence(folder / 'intent.json', intent)
+            manual.evidence(marker, {'intent': manual.pointer(folder / 'intent.json')})
+            created = creator(parent, meta)
+            manual.evidence(folder / 'created.json', created)
+            nr.require(created.get('url') == HOME and created.get('active') is True
+                       and type(created.get('tabId')) is int
+                       and created['tabId'] not in (slot['chrome_tab_id'], missing['tabs']['detail']['chrome_tab_id'])
+                       and created.get('windowId') == slot['window_id'], 'PROJECT_TAB_CREATE_MISMATCH')
+            nr.require(nr.current_stops(keys) == attempt['stops'], 'PROJECT_TAB_STOP_CHANGED')
+            nr.require(bridge.load_binding(parent_project, binding) == parent, 'PROJECT_TAB_PARENT_CHANGED')
+            request = {'user_statement': authorization, 'processed_at': xp.legacy.now(),
+                       'normal_other_posts_statement': 'The current authorized parent page was actually verified; replacement access still needs search and body review.',
+                       'statement_origin': 'automated_observation_not_user_restoration_claim',
+                       'presearch_replacement': manual.pointer(folder / 'intent.json')}
+            manual.evidence(folder / 'request.json', request)
+        except bridge.BridgeError as exc:
+            if exc.code == 'ACCESS_STOP': bridge.identity.stop_all(keys, 'Observed browser login/verification/access restriction')
+            raise
+        finally: driver.close()
+    try:
+        result = manual.inspect(project, binding, folder / 'created.json', folder / 'request.json', parent_project)
+    except bridge.BridgeError as exc:
+        if exc.code == 'ACCESS_STOP':
+            with nr.locked_stops(parent['profile_guard_key'], parent['account_uid']) as keys:
+                bridge.identity.stop_all(keys, 'Observed browser login/verification/access restriction')
+        raise
+    manual.evidence(folder / 'done.json', {'inspection': manual.pointer(result['inspection']),
+                    'intent': manual.pointer(folder / 'intent.json'), 'collection_permitted': False, 'at': xp.legacy.now()})
+    return dict(result, replacement_home=True, fresh_search_and_body_required=True)
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--project',type=Path,required=True);p.add_argument('--parent-project',type=Path,required=True)
     p.add_argument('--binding',required=True);p.add_argument('--authorization',required=True)
     p.add_argument('--renew-from-inspection',type=Path,
                    help='Completed archived home inspection of this destination; current parent access remains required.')
+    p.add_argument('--replace-missing-before-search',type=Path,
+                   help='Original completed home inspection whose first search metadata failed with exact target absence.')
     a=p.parse_args()
+    if a.replace_missing_before_search:
+        nr.require(not a.renew_from_inspection, 'PROJECT_TAB_REPLACEMENT_MODE_CONFLICT')
+        result=replace_missing_presearch_home(a.project,a.parent_project,a.binding,a.authorization,a.replace_missing_before_search)
+        print(json.dumps(result,ensure_ascii=False));return
     print(json.dumps(prepare(a.project,a.parent_project,a.binding,a.authorization,
                             renew_from_inspection=a.renew_from_inspection),ensure_ascii=False))
 

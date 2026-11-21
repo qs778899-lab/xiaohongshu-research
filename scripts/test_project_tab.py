@@ -279,4 +279,139 @@ class HistoricalPreparationTests(unittest.TestCase):
   g=copy.deepcopy(self.grant);g['probe']=m.pointer(probe_file);self.replace_grant(g)
   with self.assertRaisesRegex(Exception,'PROJECT_TAB_INSPECTION_CHANGED'):self.check()
 
+
+class PresearchReplacementTests(unittest.TestCase):
+ def setUp(self):
+  self.fixture=manual_fixtures.ManualTabTests(methodName='runTest');self.fixture.setUp()
+  self.addCleanup(self.fixture.doCleanups);f=self.fixture
+  self.project=f.p/'dest';self.source=f.p;f.url=t.HOME
+  f.parent['tabs']['detail'].update(page='P'*32,chrome_tab_id=10,window_id=22,last_url=t.HOME,session='parent-session')
+  f.parent['tabs']['detail'].pop('navigation_intent')
+  self.created=0;self.mode='absent';self.warn=False;self.create_failure=False
+  case=self
+  class Driver:
+   def __init__(self,*a):pass
+   def close(self):pass
+   def call(self,action,b=None,role=None,**kw):
+    f.calls.append(action)
+    if action=='lease_status':return {'matching':0,'leaseTabCount':0,'tabs':[]}
+    if action=='probe_registered_target':return {'state':'registered_target_absent' if case.mode=='absent' else 'registered_target_exists_but_lease_missing','page':b['tabs']['detail']['page']}
+    if action=='metadata':return {'page':'P'*32,'url':t.HOME}
+    if action=='identity':
+     if case.warn:raise t.bridge.BridgeError('ACCESS_STOP')
+     return {'page':b['tabs']['detail']['page'],'url':t.HOME,'uid':f.uid}
+    if action=='adopt_user_tab':return {'page':('A' if kw['chromeTabId']==11 else 'B')*32,'url':t.HOME,'owned':False}
+    raise AssertionError(action)
+  f.driver=Driver
+  with self.mocks():
+   result=t.prepare(self.project,self.source,'old','Synthetic autonomous tab authorization.',self.creator)
+  self.inspection=Path(result['inspection']);self.root=self.inspection.parent
+  m.evidence(self.root/'search-attempt.json',{'at':t.xp.legacy.now(),'inspection':m.pointer(self.inspection),
+   'scope':'one_existing_query_health_check_only','task':'synthetic-query','url':'https://www.xiaohongshu.com/search_result?keyword=example&type=51'})
+  m.evidence(self.root/'search-failure.json',{'at':t.xp.legacy.now(),'error':'TARGET_MISSING','collection_permitted':False})
+  self.original={p:p.read_bytes() for p in self.root.iterdir() if p.is_file()}
+  self.created=0;f.calls.clear()
+ def creator(self,*args):
+  self.created+=1
+  if self.create_failure:raise t.bridge.BridgeError('PROJECT_TAB_CREATE_OUTCOME_UNKNOWN')
+  tab=11 if not hasattr(self,'inspection') else 12
+  return {'tabId':tab,'windowId':22,'url':t.HOME,'active':True}
+ @contextlib.contextmanager
+ def mocks(self):
+  @contextlib.contextmanager
+  def lease(*args):yield ['k']
+  with self.fixture.mocks(),patch.object(t.bridge,'lease',lease):yield
+ def run_replace(self):
+  return t.replace_missing_presearch_home(self.project,self.source,'old','Synthetic autonomous tab authorization.',self.inspection,self.creator)
+ def test_success_preserves_old_evidence_requires_fresh_search(self):
+  with self.mocks():r=self.run_replace()
+  self.assertTrue(r['replacement_home']);self.assertFalse(r['collection_permitted'])
+  self.assertEqual(self.created,1)
+  for p,b in self.original.items():self.assertEqual(p.read_bytes(),b)
+  self.assertNotEqual(r['inspection'],str(self.inspection))
+  record=next((self.fixture.p/'account-guard/project-tab-preparations').glob('*.done.json'))
+  with self.mocks(),self.assertRaisesRegex(Exception,'FRESH_ATTESTATION'):
+   t.completed_preparation(record.with_name(record.name.replace('.done.json','.json')),['k'])
+ def test_second_replacement_and_lost_temporary_marker_cannot_recreate(self):
+  with self.mocks():
+   self.run_replace()
+   for f in (self.fixture.p/'account-guard/project-tab-preparations').glob('*.replacement.json'):f.unlink()
+   with self.assertRaisesRegex(Exception,'ALREADY_ATTEMPTED'):self.run_replace()
+  self.assertEqual(self.created,1)
+ def test_unknown_creation_consumes_single_attempt(self):
+  self.create_failure=True
+  with self.mocks():
+   with self.assertRaisesRegex(Exception,'OUTCOME_UNKNOWN'):self.run_replace()
+   with self.assertRaisesRegex(Exception,'ALREADY_ATTEMPTED'):self.run_replace()
+  self.assertEqual(self.created,1)
+ def test_any_search_progress_rejects_before_browser(self):
+  for n in ['search-before.json','search-navigation.json','search-capture-0.json','search-metadata-0.json','grant.json','note-attempt.json']:
+   f=self.root/n;f.write_text('{}')
+   with self.mocks(),self.assertRaisesRegex(Exception,'MAY_HAVE_PROGRESS'):self.run_replace()
+   f.unlink()
+  self.assertEqual(self.fixture.calls,[]);self.assertEqual(self.created,0)
+ def test_other_failure_types_cannot_replace(self):
+  p=self.root/'search-failure.json';old=json.loads(p.read_text())
+  for error in ['ACCESS_STOP','COMMAND_OUTCOME_UNKNOWN','MANUAL_QUERY_CHANGED']:
+   p.write_text(json.dumps(dict(old,error=error)))
+   with self.mocks(),self.assertRaisesRegex(Exception,'PRESEARCH_MISSING'):self.run_replace()
+  self.assertEqual(self.fixture.calls,[])
+ def test_existing_target_or_missing_lease_cannot_replace(self):
+  self.mode='exists'
+  with self.mocks(),self.assertRaisesRegex(Exception,'EXACT_ABSENCE'):self.run_replace()
+  self.assertEqual(self.created,0)
+ def test_new_stop_rejects_before_browser(self):
+  self.fixture.stops=dict(self.fixture.stops,additional={'sha256':'f'*64})
+  with self.mocks(),self.assertRaisesRegex(Exception,'STOP_CHANGED'):self.run_replace()
+  self.assertEqual(self.created,0);self.assertEqual(self.fixture.calls,[])
+ def test_invalid_current_parent_lease_cannot_replace(self):
+  with self.mocks(),patch.object(t.bridge,'lease',side_effect=t.bridge.BridgeError('SHARED_STOP')),self.assertRaisesRegex(Exception,'SHARED_STOP'):self.run_replace()
+  self.assertEqual(self.created,0)
+ def test_live_access_warning_stops_shared_account(self):
+  self.warn=True
+  with self.mocks(),patch.object(t.bridge.identity,'stop_all') as stop,self.assertRaisesRegex(Exception,'ACCESS_STOP'):self.run_replace()
+  stop.assert_called_once();self.assertEqual(self.created,0)
+ def test_changed_frozen_stop_rejected(self):
+  attempt=m.check_pointer(m.check_pointer(m.pointer(self.inspection))['attempt'])
+  Path(next(iter(attempt['frozen_stops'].values()))['file']).write_text('{}')
+  with self.mocks(),self.assertRaises(Exception):self.run_replace()
+  self.assertEqual(self.created,0)
+ def test_changed_parent_account_rejected(self):
+  self.fixture.parent=dict(self.fixture.parent,account_uid='9'*24)
+  with self.mocks(),self.assertRaisesRegex(Exception,'PARENT_CHANGED'):self.run_replace()
+  self.assertEqual(self.created,0)
+ def test_replacement_home_cannot_be_replaced_again(self):
+  with self.mocks():r=self.run_replace()
+  newer=Path(r['inspection']);self.inspection=newer
+  with self.mocks(),self.assertRaises(Exception):self.run_replace()
+  self.assertEqual(self.created,1)
+ def test_full_fresh_probe_chain_allows_future_preparation(self):
+  with self.mocks():r=self.run_replace()
+  f=self.fixture;initial=Path(r['inspection']);root=initial.parent;inspected=m.check_pointer(m.pointer(initial))
+  capture={'uid':f.uid,'url':'https://www.xiaohongshu.com/search_result?keyword=example&type=51',
+   'cards':[{'url':'https://www.xiaohongshu.com/explore/'+'3'*24,'text':'Synthetic diary'}]}
+  search=dict(inspected,initial_inspection=m.pointer(initial),capture=m.evidence(root/'actual-search.json',capture))
+  note={'uid':f.uid,'url':capture['cards'][0]['url'],'title':'Synthetic diary','body':'Synthetic treatment narrative.',
+   'authors':[{'name':'synthetic','url':'https://www.xiaohongshu.com/user/profile/'+'5'*24}]}
+  b=copy.deepcopy(inspected['binding']);b['tabs']['detail']['last_url']=note['url'];b['tabs']['search']=b['tabs']['detail']
+  probe={'kind':m.KIND,'binding':b,'inspection':m.evidence(root/'search-probe.json',search),
+   'capture':m.evidence(root/'normal-note.json',note),'excluded_note_id':None,'collection_permitted':False}
+  probe_file=root/'note-probe.json';m.evidence(probe_file,probe)
+  review=f.put('review.json',{'reader':'codex','reviewed':True,'body_read':True,'capture_sha256':probe['capture']['sha256'],
+   'summary':'Read the synthetic narrative and author.','positions':['/title','/body','/authors'],
+   'comments_read':False,'media_read':False})
+  with self.mocks():m.attest(probe_file,review,'new')
+  record=next((f.p/'account-guard/project-tab-preparations').glob('*.done.json'))
+  record=record.with_name(record.name.replace('.done.json','.json'))
+  with patch.object(m.nr,'current_stops',return_value=f.stops):t.completed_preparation(record,['k'])
+  # A later project enumerates the original registry and must ignore sidecars,
+  # while the original record validates its completed replacement chain.
+  original_load=t.bridge.load_binding
+  def load(project,name):
+   return f.parent if Path(project)==self.source else original_load(project,name)
+  with self.mocks(),patch.object(t.bridge,'load_binding',side_effect=load),patch.object(t.manual,'inspect',return_value=r):
+   t.prepare(f.p/'later',self.source,'old','Synthetic next project.',self.creator)
+  (root/'normal-note.json').write_text('{}')
+  with patch.object(m.nr,'current_stops',return_value=f.stops),self.assertRaises(Exception):t.completed_preparation(record,['k'])
+
 if __name__=='__main__':unittest.main()
