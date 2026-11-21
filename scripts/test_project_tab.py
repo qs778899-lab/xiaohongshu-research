@@ -73,6 +73,26 @@ class ProjectTabTests(unittest.TestCase):
  def test_same_project_rejected(self):
   with self.assertRaisesRegex(Exception,'DISTINCT_PROJECT'):t.prepare(self.source,self.source,'test','yes')
 
+ def test_renewal_preserves_old_files_and_rejects_repeat_after_registry_loss(self):
+  old=self.dest/'bridge/project-tab-preparation';old.mkdir(parents=True)
+  (old/'parent.json').write_text('old immutable record')
+  ref={'inspection':{'file':'synthetic','sha256':'a'*64},'grant':{'file':'synthetic','sha256':'b'*64}}
+  with self.mocks(),patch.object(t,'renewal_archive',return_value=ref):
+   r=t.prepare(self.dest,self.source,'test','Authorized renewal.',self.creator,Path('synthetic'))
+   self.assertFalse(r['collection_permitted']);self.assertEqual(self.created,1)
+   self.assertEqual((old/'parent.json').read_text(),'old immutable record')
+   # Even loss of the temporary account directory cannot replay a creation.
+   for f in (self.base/'guard/project-tab-preparations').glob('*.json'):f.unlink()
+   with self.assertRaisesRegex(Exception,'ALREADY_ATTEMPTED'):
+    t.prepare(self.dest,self.source,'test','Authorized renewal.',self.creator,Path('synthetic'))
+   self.assertEqual(self.created,1)
+
+ def test_renewal_cannot_bypass_invalid_current_parent(self):
+  with self.mocks(),patch.object(t.bridge,'lease',side_effect=RuntimeError('STOP')),patch.object(t,'renewal_archive') as archive:
+   with self.assertRaisesRegex(Exception,'STOP'):
+    t.prepare(self.dest,self.source,'test','Authorized renewal.',self.creator,Path('synthetic'))
+   archive.assert_not_called();self.assertEqual(self.created,0)
+
 class HistoricalPreparationTests(unittest.TestCase):
  def setUp(self):
   # Use the actual manual probe/review validators with synthetic archived data.
@@ -138,6 +158,46 @@ class HistoricalPreparationTests(unittest.TestCase):
  def test_changed_current_stops_still_reject_historical_completion(self):
   changed={'k':dict(self.fixture.stops['k'],sha256='f'*64)}
   with self.assertRaisesRegex(Exception,'MANUAL_STOP_CHANGED'):self.check(changed)
+
+ def test_renewal_archive_only_proves_old_completion_when_stops_have_changed(self):
+  inspection=self.root/'inspection.json'
+  changed={'k':dict(self.fixture.stops['k'],sha256='f'*64)}
+  with patch.object(m.nr,'current_stops',return_value=changed):
+   r=t.renewal_archive(self.fixture.p,inspection,self.binding)
+   self.assertEqual(r['inspection'],m.pointer(inspection))
+   with self.assertRaisesRegex(Exception,'MANUAL_STOP_CHANGED'):self.check(changed)
+
+ def test_renewal_rejects_account_and_context_changes(self):
+  for field in ['account_uid','context_id']:
+   parent=dict(self.binding);parent[field]='other'
+   with self.assertRaisesRegex(Exception,'RENEWAL_ACCOUNT_CHANGED'):
+    t.renewal_archive(self.fixture.p,self.root/'inspection.json',parent)
+
+ def test_renewal_requires_completed_review_and_exact_project(self):
+  with self.assertRaisesRegex(Exception,'RENEWAL_LOCATION_CHANGED'):
+   t.renewal_archive(self.fixture.p/'another',self.root/'inspection.json',self.binding)
+  Path(self.grant['review']['file']).write_text('{}')
+  with self.assertRaises(Exception):t.renewal_archive(self.fixture.p,self.root/'inspection.json',self.binding)
+
+ def remove_temporary_reservation(self):
+  probe=m.check_pointer(self.grant['probe']);search=m.check_pointer(probe['inspection'])
+  attempt=m.check_pointer(search['attempt']);Path(attempt['account_attempt']['file']).unlink()
+
+ def test_missing_temporary_reservation_is_history_only(self):
+  self.remove_temporary_reservation()
+  result=t.renewal_archive(self.fixture.p,self.root/'inspection.json',self.binding)
+  self.assertEqual(result['grant'],m.pointer(self.root/'grant.json'))
+  with self.assertRaisesRegex(Exception,'ORIGINAL_FILE_REQUIRED'):m.validated_probe(self.grant['probe'])
+
+ def test_missing_reservation_does_not_hide_changed_source_or_review(self):
+  self.remove_temporary_reservation()
+  probe=m.check_pointer(self.grant['probe']);Path(probe['capture']['file']).write_text('{}')
+  with self.assertRaises(Exception):t.renewal_archive(self.fixture.p,self.root/'inspection.json',self.binding)
+
+ def test_present_but_changed_reservation_is_rejected(self):
+  probe=m.check_pointer(self.grant['probe']);search=m.check_pointer(probe['inspection'])
+  attempt=m.check_pointer(search['attempt']);Path(attempt['account_attempt']['file']).write_text('{}')
+  with self.assertRaises(Exception):t.renewal_archive(self.fixture.p,self.root/'inspection.json',self.binding)
 
  def test_changed_binding_account_is_rejected(self):
   b=copy.deepcopy(self.binding);b['account_uid']='8'*24;self.write_binding(b)

@@ -17,6 +17,62 @@ import xhs_project as xp
 HOME = 'https://www.xiaohongshu.com/explore'
 
 
+def archived_probe(probe_ref):
+    """Validate durable history after a temporary reservation was removed.
+
+    This proof never authorizes collection. Current bindings continue to use
+    manual.validated_probe, which requires the original reservation as before.
+    """
+    probe = manual.check_pointer(probe_ref)
+    inspected = manual.check_pointer(probe['inspection'])
+    attempt = manual.check_pointer(inspected['attempt'])
+    reservation = attempt.get('account_attempt', {})
+    if not reservation or Path(reservation['file']).exists():
+        return manual.validated_probe(probe_ref)
+    parent = manual.check_pointer(attempt['parent'])
+    key = xp.digest({'stops': attempt['stops'], 'context': parent['context_id'],
+                     'tabId': attempt['target']['tabId']})
+    expected = xp.legacy.account_root() / 'manual-tab-attempts' / (key + '.json')
+    nr.require(Path(reservation['file']).resolve() == expected.resolve()
+               and not Path(reservation['file']).is_symlink()
+               and isinstance(reservation.get('sha256'), str)
+               and len(reservation['sha256']) == 64
+               and set(reservation['sha256']) <= set('0123456789abcdef'),
+               'PROJECT_TAB_ARCHIVED_RESERVATION_INVALID')
+    # Continuations have additional proofs; do not silently broaden this path.
+    nr.require(inspected.get('initial_inspection') and not inspected.get('verified_search_continuation'),
+               'PROJECT_TAB_ARCHIVED_DIRECT_SEARCH_REQUIRED')
+    initial = manual.check_pointer(inspected['initial_inspection'])
+    nr.require(not (Path(inspected['initial_inspection']['file']).parent /
+                    'verified-search-continuation.json').exists(), 'PROJECT_TAB_ARCHIVED_DIRECT_SEARCH_REQUIRED')
+    nr.require(probe.get('kind') == manual.KIND and initial['attempt'] == inspected['attempt'],
+               'MANUAL_ATTEMPT_CHANGED')
+    user = manual.check_pointer(attempt['user'])
+    nr.require(probe['binding'].get('project') == attempt['project'] == initial['binding'].get('project')
+               and attempt.get('parent_project', attempt['project']) == parent.get('project'),
+               'MANUAL_DESTINATION_PROJECT_CHANGED')
+    for field in ('context_id', 'account_uid', 'profile_guard_key', 'profile_label', 'runtime'):
+        nr.require(probe['binding'].get(field) == parent.get(field), 'MANUAL_PARENT_IDENTITY_CHANGED')
+    nr.require(user.get('user_statement') and user.get('normal_other_posts_statement'),
+               'MANUAL_USER_RESTORATION_REQUIRED')
+    nr.require(all(nr.stamp(user['processed_at']) > nr.stamp(s['at']) for s in attempt['stops'].values()),
+               'MANUAL_CONFIRMATION_PREDATES_STOP')
+    search = manual.check_pointer(inspected['capture'])
+    nr.require(manual.proof_args(search['url'])['stage'] == 'search', 'MANUAL_ACTUAL_SEARCH_REQUIRED')
+    manual.require_capture(search, probe['binding'], manual.proof_args(search['url']))
+    capture = manual.check_pointer(probe['capture'])
+    nr.require(manual.note_id(capture['url']), 'MANUAL_NOTE_CONTENT_REQUIRED')
+    manual.require_capture(capture, probe['binding'], manual.proof_args(capture['url']))
+    nr.require(manual.note_id(capture['url']) in {manual.note_id(c['url']) for c in search['cards']},
+               'MANUAL_NOTE_NOT_IN_SEARCH')
+    original = parent.get('tabs', {}).get('detail', {}).get('navigation_intent', {}).get('url')
+    nr.require(probe.get('excluded_note_id') == (manual.note_id(original) if original else None)
+               and manual.note_id(capture['url']) not in manual.excluded_notes(parent),
+               'ORIGINAL_RESTRICTED_NOTE_EXCLUDED')
+    for ref in attempt['frozen_stops'].values(): manual.check_pointer(ref)
+    return probe, attempt, capture
+
+
 def create_home(parent, meta):
     # Driver construction verifies the pinned runtime before this entry is used.
     runtime = parent['runtime']
@@ -37,7 +93,7 @@ def create_home(parent, meta):
     return packet['data']
 
 
-def validate_historical_preparation(project, b, grant, keys):
+def validate_preparation_archive(project, b, grant, allow_missing_temporary_reservation=False):
     """Verify an archived preparation, without granting current web access.
 
     A completed preparation remains a historical fact after collector code
@@ -63,13 +119,42 @@ def validate_historical_preparation(project, b, grant, keys):
     nr.require(set(b.get('tabs', {})) == {'search', 'detail'}
                and all(s.get('owned') is False for s in b['tabs'].values()),
                'MANUAL_USER_TAB_OWNERSHIP_CHANGED')
-    probe, attempt, _ = manual.validated_probe(grant['probe'])
+    reader = archived_probe if allow_missing_temporary_reservation else manual.validated_probe
+    probe, attempt, _ = reader(grant['probe'])
     manual.validate_review(manual.check_pointer(grant['review']), probe)
-    nr.require(grant['stops'] == attempt['stops'] == nr.current_stops(keys), 'MANUAL_STOP_CHANGED')
+    nr.require(grant['stops'] == attempt['stops'], 'MANUAL_STOP_CHANGED')
     expected = dict(probe['binding'], binding_name=b['binding_name'],
                     manual_excluded_note_ids=b['manual_excluded_note_ids'])
     nr.require(manual.authority(expected) == manual.authority(b), 'MANUAL_PROBE_BINDING_CHANGED')
     return probe
+
+
+def validate_historical_preparation(project, b, grant, keys):
+    probe = validate_preparation_archive(project, b, grant)
+    nr.require(grant['stops'] == nr.current_stops(keys), 'MANUAL_STOP_CHANGED')
+    return probe
+
+
+def renewal_archive(project, inspection_file, parent):
+    """Completed old access is history only; a current parent lease is mandatory."""
+    inspection_file = Path(inspection_file).resolve()
+    nr.require(inspection_file.parent.parent == project / 'bridge' / 'manual-tab-recoveries'
+               and inspection_file.name == 'inspection.json', 'PROJECT_TAB_RENEWAL_LOCATION_CHANGED')
+    inspected = manual.check_pointer(manual.pointer(inspection_file))
+    grant_file = inspection_file.parent / 'grant.json'
+    nr.require(grant_file.is_file(), 'PROJECT_TAB_FRESH_ATTESTATION_REQUIRED')
+    grant = manual.check_pointer(manual.pointer(grant_file))
+    b = bridge.load_binding(project, grant['authority']['binding_name'])
+    nr.require(b.get('manual_tab_revalidation') == manual.pointer(grant_file), 'PROJECT_TAB_GRANT_CHANGED')
+    probe = validate_preparation_archive(project, b, grant, allow_missing_temporary_reservation=True)
+    search = manual.check_pointer(probe['inspection'])
+    nr.require(search.get('initial_inspection') == manual.pointer(inspection_file),
+               'PROJECT_TAB_INSPECTION_CHANGED')
+    nr.require(b['tabs']['detail']['page'] == inspected['binding']['tabs']['detail']['page'],
+               'PROJECT_TAB_ATTESTATION_TARGET_CHANGED')
+    nr.require(b['account_uid'] == parent['account_uid'] and b['context_id'] == parent['context_id'],
+               'PROJECT_TAB_RENEWAL_ACCOUNT_CHANGED')
+    return {'inspection': manual.pointer(inspection_file), 'grant': manual.pointer(grant_file)}
 
 
 def completed_preparation(record, keys):
@@ -90,7 +175,7 @@ def completed_preparation(record, keys):
     nr.require(search.get('initial_inspection') == result['inspection'], 'PROJECT_TAB_INSPECTION_CHANGED')
 
 
-def prepare(project, parent_project, binding, authorization, creator=create_home):
+def prepare(project, parent_project, binding, authorization, creator=create_home, renew_from_inspection=None):
     project=Path(project).resolve(); parent_project=Path(parent_project).resolve()
     xp.legacy.research_path(project)
     nr.require(project!=parent_project,'DISTINCT_PROJECT_REQUIRED')
@@ -103,11 +188,18 @@ def prepare(project, parent_project, binding, authorization, creator=create_home
     # STOP bytes and live identity must all remain valid before creating a tab.
     with bridge.lease(parent_project,parent) as keys:
         stops=nr.current_stops(keys)
+        renewal = renewal_archive(project, renew_from_inspection, parent) if renew_from_inspection else None
         root=xp.legacy.account_root()/'project-tab-preparations'
         root.mkdir(parents=True,exist_ok=True)
-        key=xp.digest({'context':parent['context_id'],'project':str(project)})
+        identity = {'context':parent['context_id'],'project':str(project)}
+        if renewal: identity['renewal'] = renewal
+        key=xp.digest(identity)
         record=root/(key+'.json')
         nr.require(not record.exists(),'PROJECT_TAB_ALREADY_ATTEMPTED')
+        folder=(project/'bridge'/'project-tab-renewals'/key if renewal
+                else project/'bridge'/'project-tab-preparation')
+        if renewal:
+            nr.require(not (folder/'intent.json').exists(), 'PROJECT_TAB_ALREADY_ATTEMPTED')
         for old in root.glob('*.json'):
             if old.name.endswith('.done.json'):continue
             value,_=nr.read_json(old)
@@ -124,11 +216,12 @@ def prepare(project, parent_project, binding, authorization, creator=create_home
                        'PROJECT_TAB_PARENT_CHANGED')
             bridge.safe_url(meta['url'])
             nr.require(nr.current_stops(keys)==stops,'PROJECT_TAB_STOP_CHANGED')
-            folder=project/'bridge'/'project-tab-preparation';folder.mkdir(parents=True,exist_ok=True)
+            folder.mkdir(parents=True,exist_ok=True)
             intent={'context_id':parent['context_id'],'account_uid':parent['account_uid'],'project':str(project),'parent_project':str(parent_project),
                     'parent_binding':binding,'authorization':authorization,'at':xp.legacy.now(),
                     'stops':stops,'parent':manual.evidence(folder/'parent.json',parent),
                     'identity':manual.evidence(folder/'parent-identity.json',ident)}
+            if renewal: intent['renewal'] = renewal
             manual.evidence(record,intent)
             manual.evidence(folder/'intent.json',intent)
             created=creator(parent,meta)
@@ -165,7 +258,10 @@ def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--project',type=Path,required=True);p.add_argument('--parent-project',type=Path,required=True)
     p.add_argument('--binding',required=True);p.add_argument('--authorization',required=True)
+    p.add_argument('--renew-from-inspection',type=Path,
+                   help='Completed archived home inspection of this destination; current parent access remains required.')
     a=p.parse_args()
-    print(json.dumps(prepare(a.project,a.parent_project,a.binding,a.authorization),ensure_ascii=False))
+    print(json.dumps(prepare(a.project,a.parent_project,a.binding,a.authorization,
+                            renew_from_inspection=a.renew_from_inspection),ensure_ascii=False))
 
 if __name__=='__main__':main()
