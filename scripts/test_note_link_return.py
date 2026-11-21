@@ -26,6 +26,17 @@ class Tests(unittest.TestCase):
         b=bridge.load_binding(self.p,self.name);self.assertEqual(b['state'],'ready');self.assertEqual(manual.authority(b),manual.authority(self.b))
         self.assertIn(fixture.BAD_URL,b['failed_note_links']);self.assertFalse(result['body_read'])
         with bridge.lease(self.p,b):pass
+    def test_second_note_error_returns_only_after_same_home_identity(self):
+        saved=manual.check_pointer(manual.pointer(self.observation))
+        saved['metadata']['url']=self.error.replace('-510001','-510000')
+        self.observation=self.f.fixture.put('second-link-failure.json',saved)
+        self.driver.url='https://www.xiaohongshu.com/explore?source=404'
+        self.run_return();self.assertEqual(self.driver.calls.count('navigate'),1);self.f.unchanged()
+    def test_other_error_codes_are_rejected_before_navigation(self):
+        for code in ['300031','300017','-510002']:
+            with self.assertRaisesRegex(bridge.BridgeError,'EXACT_NOTE_LINK_ERROR_REQUIRED'):
+                helper.validate_error(self.error.replace('-510001',code),fixture.BAD_URL,self.b['tabs']['detail']['last_url'])
+        self.assertEqual(self.navigations,[])
     def test_unknown_navigation_not_replayed(self):
         def nav(*args):self.navigations.append('unknown');raise bridge.BridgeError('COMMAND_OUTCOME_UNKNOWN')
         with self.assertRaises(bridge.BridgeError):self.run_return(nav)

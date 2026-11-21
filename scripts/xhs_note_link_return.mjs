@@ -12,7 +12,7 @@ export function validateError(errorUrl,failedUrl,targetUrl) {
   const allowed=['source','noteId','errorCode','xsec_token','xsec_source'];
   if(e.origin!=='https://www.xiaohongshu.com'||e.pathname!=='/404'||e.username||e.password||e.hash||
      [...e.searchParams.keys()].some(k=>!allowed.includes(k)||e.searchParams.getAll(k).length!==1)||
-     e.searchParams.get('source')!=='note'||e.searchParams.get('errorCode')!=='-510001'||
+     e.searchParams.get('source')!=='note'||!['-510001','-510000'].includes(e.searchParams.get('errorCode'))||
      e.searchParams.get('noteId')!==id(failed.pathname)||
      ['xsec_token','xsec_source'].some(k=>e.searchParams.get(k)!==failed.searchParams.get(k)))throw new Error('EXACT_NOTE_LINK_ERROR_REQUIRED');
 }

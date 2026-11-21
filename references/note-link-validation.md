@@ -4,7 +4,7 @@
 
 ## 精确单帖错误返回
 
-现有有效网页凭据的手动绑定在打开一条已观察链接后，落到 `/404?source=note&noteId=...&errorCode=-510001` 时，可使用 `xhs_note_link_return.py --project P --binding B --observation FAILED_JSON --authorization AUTHORIZATION`。输入是实际保存的 `status=failed`、`requested_url`、`metadata.page/url`，必须和原绑定导航意图一致。其他错误码、额外参数、验证或账号提示均不适用。
+现有有效网页凭据的手动绑定在打开一条已观察链接后，落到 `/404?source=note&noteId=...&errorCode=-510001` 或相同参数结构的 `errorCode=-510000` 时，可使用 `xhs_note_link_return.py --project P --binding B --observation FAILED_JSON --authorization AUTHORIZATION`。输入是实际保存的 `status=failed`、`requested_url`、`metadata.page/url`，必须和原绑定导航意图一致。其他错误码、额外参数、验证或账号提示均不适用。
 
 该入口只返回原凭据健康帖或同账号、同地址、哈希完整的已有正常正文：同 context、session、CDP page、原生 tab/window，保留全部 STOP。先核原页真实错误文字、无访问限制，已显示账号须匹配；错误页未显示账号时只允许返回公开健康帖，随后必须再次核对原账号和正常正文。结果不明不重放。失败链接永久登记于绑定 `failed_note_links`；不得用此入口重试它或解开原帖 hold。
 

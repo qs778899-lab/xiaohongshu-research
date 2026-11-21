@@ -20,7 +20,7 @@ def validate_error(error,failed,target):
     nr.require(e.scheme=='https' and e.netloc=='www.xiaohongshu.com' and e.path=='/404' and not e.fragment,
                'EXACT_NOTE_LINK_ERROR_REQUIRED')
     nr.require(set(q)<= {'source','noteId','errorCode','xsec_token','xsec_source'} and all(len(v)==1 for v in q.values()),'EXACT_NOTE_LINK_ERROR_REQUIRED')
-    nr.require(q.get('source')==['note'] and q.get('errorCode')==['-510001'] and q.get('noteId')==[manual.note_id(failed)] and manual.note_id(failed) and manual.note_id(target) and manual.note_id(target)!=manual.note_id(failed),'EXACT_NOTE_LINK_ERROR_REQUIRED')
+    nr.require(q.get('source')==['note'] and q.get('errorCode') in (['-510001'],['-510000']) and q.get('noteId')==[manual.note_id(failed)] and manual.note_id(failed) and manual.note_id(target) and manual.note_id(target)!=manual.note_id(failed),'EXACT_NOTE_LINK_ERROR_REQUIRED')
     for key in ['xsec_token','xsec_source']:
         nr.require(q.get(key)==parse_qs(f.query,keep_blank_values=True).get(key),'FAILED_LINK_PARAMETERS_CHANGED')
 
