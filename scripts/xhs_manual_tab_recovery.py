@@ -321,11 +321,42 @@ def probe_search(inspection_file,task_id):
             raise
         finally:driver.close()
 
-def probe_note(inspection_file,url):
+def pre_navigation_note_history(inspection_file):
+    """Accept only a stopped metadata check, never a submitted navigation."""
+    root=Path(inspection_file).parent
+    inspected=check_pointer(pointer(inspection_file));loaded=check_pointer(inspected['capture'])
+    refs={name:pointer(root/name) for name in ('note-attempt.json','note-before.json','note-failure.json')}
+    prior,before,failure=(check_pointer(refs[name]) for name in refs)
+    nr.require(prior.get('inspection')==pointer(inspection_file)
+        and failure.get('error')=='MANUAL_PAGE_CHANGED'
+        and not (root/'note-navigation.json').exists()
+        and not list(root.glob('note-metadata-*.json'))
+        and not list(root.glob('note-capture-*.json'))
+        and before.get('page')==inspected['binding']['tabs']['detail']['page']
+        and before.get('url')!=loaded['url']
+        and note_id(before.get('url','')) in {note_id(c['url']) for c in loaded.get('cards',[])}
+        and prior.get('url') in {c['url'] for c in loaded.get('cards',[])}
+        and nr.stamp(prior['at'])<=nr.stamp(failure['at']),
+        'MANUAL_PRE_NAVIGATION_CONTINUATION_NOT_APPLICABLE')
+    return refs
+
+
+def resume_note(inspection_file):
+    history=pre_navigation_note_history(inspection_file)
+    prior=check_pointer(history['note-attempt.json'])
+    return probe_note(inspection_file,prior['url'],resume_before_navigation=True)
+
+
+def probe_note(inspection_file,url,resume_before_navigation=False):
     inspected,_=nr.read_json(inspection_file)
     attempt=check_pointer(inspected['attempt'])
     loaded=check_pointer(inspected['capture'])
     b=inspected['binding'];root=Path(inspection_file).parent
+    history=None
+    if resume_before_navigation:
+        history=pre_navigation_note_history(inspection_file)
+        nr.require(url==check_pointer(history['note-attempt.json'])['url'],'MANUAL_ORIGINAL_NOTE_REQUIRED')
+        root=root/'note-before-navigation-continuation'
     target=note_id(url)
     nr.require(target,'MANUAL_NOTE_LINK_REQUIRED')
     nr.require(url in {c.get('url') for c in loaded.get('cards',[])},'MANUAL_ACTUALLY_OBSERVED_CARD_REQUIRED')
@@ -342,7 +373,9 @@ def probe_note(inspection_file,url):
             before=driver.call('metadata',b,'detail')
             evidence(root/'note-before.json',before)
             nr.require(before.get('url')==loaded['url'],'MANUAL_PAGE_CHANGED')
-            driver.call('identity',b,'detail')
+            ident=driver.call('identity',b,'detail')
+            nr.require(ident.get('uid')==b['account_uid'] and ident.get('url')==loaded['url'],
+                       'MANUAL_SEARCH_IDENTITY_CHANGED')
             navigation=driver.call('navigate',b,'detail',url=url)
             evidence(root/'note-navigation.json',navigation)
             time.sleep(1)
@@ -367,6 +400,7 @@ def probe_note(inspection_file,url):
             result={'kind':KIND,'at':xp.legacy.now(),'inspection':pointer(inspection_file),'binding':b,
                     'capture':pointer(root/f'note-capture-{index}.json'),'excluded_note_id':note_id(original) if original else None,
                     'collection_permitted':False,'stops_unchanged':True}
+            if history:result['pre_navigation_history']=history
             evidence(root/'note-probe.json',result)
             return {'probe':str(root/'note-probe.json'),'capture':result['capture'],'collection_permitted':False}
         except Exception as exc:
@@ -630,6 +664,12 @@ def validated_probe(probe_ref):
     probe=check_pointer(probe_ref)
     nr.require(probe.get('kind')==KIND,'MANUAL_PROBE_KIND_REQUIRED')
     inspected=check_pointer(probe['inspection']);attempt=check_pointer(inspected['attempt'])
+    if probe.get('pre_navigation_history'):
+        nr.require(probe['pre_navigation_history']==pre_navigation_note_history(probe['inspection']['file']),
+                   'MANUAL_PRE_NAVIGATION_HISTORY_CHANGED')
+        original_note=check_pointer(probe['pre_navigation_history']['note-attempt.json'])
+        nr.require(note_id(check_pointer(probe['capture'])['url'])==original_note['note_id'],
+                   'MANUAL_ORIGINAL_NOTE_REQUIRED')
     if probe.get('saved_titleless_note_history'):
         root=Path(probe['inspection']['file']).parent
         history=probe['saved_titleless_note_history']
@@ -786,6 +826,7 @@ def main():
     s=sub.add_parser('finish-search');s.add_argument('--inspection',type=Path,required=True);s.add_argument('--layout-observation',type=Path)
     s=sub.add_parser('resume-verified-search');s.add_argument('--inspection',type=Path,required=True);s.add_argument('--user',type=Path,required=True)
     s=sub.add_parser('finish-note');s.add_argument('--inspection',type=Path,required=True)
+    s=sub.add_parser('resume-note');s.add_argument('--inspection',type=Path,required=True)
     s=sub.add_parser('attest');s.add_argument('--probe',type=Path,required=True);s.add_argument('--review',type=Path,required=True);s.add_argument('--binding',required=True)
     s=sub.add_parser('recheck');s.add_argument('--project',type=Path,required=True);s.add_argument('--binding',required=True)
     a=p.parse_args()
@@ -796,6 +837,7 @@ def main():
     elif a.command=='finish-search':result=finish_search(a.inspection,a.layout_observation)
     elif a.command=='resume-verified-search':result=resume_verified_search(a.inspection,a.user)
     elif a.command=='finish-note':result=finish_note(a.inspection)
+    elif a.command=='resume-note':result=resume_note(a.inspection)
     elif a.command=='attest':result=attest(a.probe,a.review,a.binding)
     elif a.command=='recheck':result=recheck(a.project,a.binding)
     else:result=probe_note(a.inspection,a.url)

@@ -193,3 +193,4 @@ scripts/test_account_state.py
 references/account-state.md
 scripts/xhs_expired_link_return.py
 scripts/test_expired_link_return.py
+scripts/test_note_pre_navigation_resume.py
