@@ -3,6 +3,7 @@ import argparse
 from pathlib import Path
 from urllib.parse import urlparse, parse_qs
 import json
+import hashlib
 import xhs_bridge as bridge
 import xhs_manual_tab_recovery as manual
 import xhs_note_recovery as nr
@@ -26,7 +27,7 @@ def validate_expired(error, failed, target):
         'EXACT_EXPIRED_NOTE_LINK_REQUIRED')
 
 
-def restore(project,name,authorization,navigator=link.navigate_error,driver=None):
+def restore(project,name,authorization,navigator=link.navigate_error,driver=None,normal_source=None):
     nr.require(isinstance(authorization,str) and authorization.strip(),'AUTHORIZATION_REQUIRED')
     project=Path(project).resolve();xp.legacy.research_path(project)
     b=bridge.load_binding(project,name);slot=b['tabs']['detail']
@@ -37,7 +38,25 @@ def restore(project,name,authorization,navigator=link.navigate_error,driver=None
     grant=manual.check_pointer(b['manual_tab_revalidation'])
     nr.require(grant.get('authority')==manual.authority(b),'ORIGINAL_AUTHORITY_CHANGED')
     probe=manual.check_pointer(grant['probe']);capture=manual.check_pointer(probe['capture'])
-    nr.require(capture.get('url')==target,'ORIGINAL_HEALTH_NOTE_REQUIRED')
+    source_ref=None
+    if normal_source is not None:
+        source=Path(normal_source)
+        validation=b.get('web_validation',{})
+        nr.require(source.is_absolute() and source.parent==project/'bridge'/'raw'
+            and not source.is_symlink() and source.is_file()
+            and validation.get('snapshot')==str(source)
+            and validation.get('context_id')==b['context_id']
+            and validation.get('uid')==b['account_uid'],'LINKED_NORMAL_BODY_REQUIRED')
+        raw=source.read_bytes();sha=hashlib.sha256(raw).hexdigest()
+        nr.require(source.name==sha+'.json','NORMAL_BODY_HASH_CHANGED')
+        capture,_=nr.read_json(source,sha)
+        nr.require(capture.get('stage')=='body' and capture.get('uid')==b['account_uid']
+            and validation.get('target')==manual.note_id(capture.get('url'))
+            and nr.stamp(validation.get('at'))<nr.stamp(b['last_error']['at']),
+            'PRE_FAILURE_NORMAL_BODY_REQUIRED')
+        target=capture.get('url');source_ref={'file':str(source),'sha256':sha}
+    else:
+        nr.require(capture.get('url')==target,'ORIGINAL_HEALTH_NOTE_REQUIRED')
     manual.require_capture(capture,b,manual.proof_args(target))
     failure_at=nr.stamp(b['last_error']['at']);owned=driver is None
     with xp.project_lock(project),nr.locked_stops(b['profile_guard_key'],b['account_uid']) as keys:
@@ -53,7 +72,7 @@ def restore(project,name,authorization,navigator=link.navigate_error,driver=None
             nr.require(meta.get('page')==slot['page'],'REGISTERED_TARGET_CHANGED')
             validate_expired(meta.get('url',''),failed,target)
             attempt=dict(at=xp.legacy.now(),binding=b,metadata=meta,stops=stops,authorization=authorization,
-                collection_permitted=False,failed_url=failed,target_url=target)
+                collection_permitted=False,failed_url=failed,target_url=target,normal_source=source_ref)
             nr.immutable(reservation,attempt);nr.immutable(root/'attempt.json',attempt)
             # This helper verifies the exact error text and rejects verification
             # prompts before submitting one navigation to the archived healthy URL.
@@ -80,5 +99,7 @@ def restore(project,name,authorization,navigator=link.navigate_error,driver=None
 if __name__=='__main__':
     parser=argparse.ArgumentParser(description=__doc__)
     parser.add_argument('--project',required=True,type=Path);parser.add_argument('--binding',required=True)
-    parser.add_argument('--authorization',required=True);a=parser.parse_args()
-    print(json.dumps(restore(a.project,a.binding,a.authorization),ensure_ascii=False))
+    parser.add_argument('--authorization',required=True)
+    parser.add_argument('--normal-source',type=Path,help='Exact pre-failure web_validation body source; never an arbitrary URL')
+    a=parser.parse_args()
+    print(json.dumps(restore(a.project,a.binding,a.authorization,normal_source=a.normal_source),ensure_ascii=False))

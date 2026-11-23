@@ -19,3 +19,5 @@
 `xhs_expired_link_return.py --project P --binding B --authorization "已有持续恢复授权"` 只处理 `/website-login/error` 中精确 `300017／当前访问链接已失效`、空 `verifyMsg`，且 `redirectPath` 等于原导航目标的错误。运行时再次核对错误正文，无验证码或登录提示才返回原归档的正常帖一次。原绑定及全部 STOP 保留；未知结果不重放。它不授予采集权限，返回后须实际阅读正常正文并完成原 `inspect-active / probe-search / probe-note / attest` 接续流程，失败帖继续排除。用户的既有自主返回授权适用于此单次返回；Codex 观察必须标明是工具观察，不能冒充用户已处理验证。
 
 来源选择保留原 URL 字节；同一目标同时出现裸链接和实际观察的带 `xsec_token` 链接时优先完整链接，不猜测、移植或更新令牌，也不保证历史完整链接仍有效。
+
+若失效发生在从搜索页切入原健康帖时，可显式传 `--normal-source` 指向同一绑定 `web_validation.snapshot` 已引用的另一篇正常正文。入口仅接受原项目 `bridge/raw` 中文件名与字节SHA一致、原账号及context一致、早于本次错误的正文来源；目标必须不同于失败帖。不修改绑定、不签发采集权限，仍需后续网页重新核验。

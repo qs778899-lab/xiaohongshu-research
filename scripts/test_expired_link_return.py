@@ -49,4 +49,39 @@ class Tests(unittest.TestCase):
             with self.assertRaises(bridge.BridgeError):expired.restore(f.p.path,f.name,'Authorized return',nav,f.driver)
         self.assertEqual(len(calls),1);f.unchanged()
 
+    def archived_source(self,f,b,**change):
+        data={'stage':'body','uid':b['account_uid'],'url':'https://www.xiaohongshu.com/explore/'+'4'*24,
+              'title':'Synthetic previously read note','body':'Synthetic normal narrative.',
+              'authors':[{'name':'Example author'}]}
+        data.update(change);raw=json.dumps(data).encode();directory=f.p.path/'bridge'/'raw';directory.mkdir(parents=True,exist_ok=True)
+        source=directory/(hashlib.sha256(raw).hexdigest()+'.json');source.write_bytes(raw)
+        b['web_validation']={'snapshot':str(source),'uid':b['account_uid'],'context_id':b['context_id'],
+            'target':'4'*24,'at':'2026-11-10T00:00:00+00:00'}
+        b['tabs']['detail']['last_url']='https://www.xiaohongshu.com/search_result?keyword=synthetic'
+        bridge.save_binding(f.p.path,f.name,b);return source
+    def test_explicit_linked_prior_body_can_return_from_a_search_origin(self):
+        f,b=self.prepare();source=self.archived_source(f,b);before=bridge.binding_path(f.p.path,f.name).read_bytes();calls=[]
+        def nav(binding,error,failed,target):calls.append(target);f.driver.url=target;return {'navigationSubmitted':True}
+        result=expired.restore(f.p.path,f.name,'Authorized return',nav,f.driver,normal_source=source)
+        self.assertEqual(calls,['https://www.xiaohongshu.com/explore/'+'4'*24]);self.assertFalse(result['collection_permitted'])
+        self.assertEqual(bridge.binding_path(f.p.path,f.name).read_bytes(),before);f.unchanged()
+    def test_changed_or_unlinked_prior_body_never_navigates(self):
+        f,b=self.prepare();source=self.archived_source(f,b);source.write_bytes(source.read_bytes()+b' ')
+        with self.assertRaisesRegex(bridge.BridgeError,'HASH_CHANGED'):
+            expired.restore(f.p.path,f.name,'Authorized return',driver=f.driver,normal_source=source)
+        self.assertEqual(f.driver.calls,[]);f.unchanged()
+    def test_wrong_account_and_post_failure_capture_never_navigate(self):
+        f,b=self.prepare();source=self.archived_source(f,b,uid='9'*24)
+        with self.assertRaisesRegex(bridge.BridgeError,'PRE_FAILURE'):
+            expired.restore(f.p.path,f.name,'Authorized return',driver=f.driver,normal_source=source)
+        source=self.archived_source(f,b);b['web_validation']['at']='2099-01-01T00:00:00+00:00';bridge.save_binding(f.p.path,f.name,b)
+        with self.assertRaisesRegex(bridge.BridgeError,'PRE_FAILURE'):
+            expired.restore(f.p.path,f.name,'Authorized return',driver=f.driver,normal_source=source)
+        self.assertEqual(f.driver.calls,[]);f.unchanged()
+    def test_unreferenced_source_never_navigates(self):
+        f,b=self.prepare();source=self.archived_source(f,b);b['web_validation']['snapshot']='different.json';bridge.save_binding(f.p.path,f.name,b)
+        with self.assertRaisesRegex(bridge.BridgeError,'LINKED_NORMAL'):
+            expired.restore(f.p.path,f.name,'Authorized return',driver=f.driver,normal_source=source)
+        self.assertEqual(f.driver.calls,[])
+
 if __name__=='__main__':unittest.main()
