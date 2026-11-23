@@ -22,9 +22,9 @@ class LayoutFake(Fake):
         return super().call(action,binding,role,**fields)
 
 class LayoutRecoveryTests(BridgeTests):
-    def run_capture(self, driver, binding=None):
+    def run_capture(self, driver, binding=None, stage='search'):
         with patch.object(b.time,'sleep',lambda _:None):
-            return b.ready_capture(self.project,binding or self.binding,driver,'detail',{'backgroundText':True,'stage':'search'})
+            return b.ready_capture(self.project,binding or self.binding,driver,'detail',{'backgroundText':True,'stage':stage})
     def test_new_layout_can_be_read_only_after_bounded_activation(self):
         driver=LayoutFake();result=self.run_capture(driver)
         self.assertEqual(result['cards'][0]['text'],'new evidence')
@@ -56,5 +56,25 @@ class LayoutRecoveryTests(BridgeTests):
         driver=LayoutFake()
         with self.assertRaisesRegex(b.BridgeError,'UNEXPECTED_TARGET_CHANGE'):self.run_capture(driver)
         self.assertNotIn('activate',[x[0] for x in driver.calls])
+
+    def test_author_layout_recovers_only_the_registered_owned_role(self):
+        driver=LayoutFake();driver.url='https://www.xiaohongshu.com/user/profile/'+'4'*24
+        self.binding['tabs']['detail']['last_url']=driver.url
+        result=self.run_capture(driver,stage='author')
+        self.assertEqual(result['cards'][0]['text'],'new evidence')
+        self.assertEqual([(x[0],x[2]) for x in driver.calls if x[0]=='activate'],[('activate','detail')])
+        self.assertNotIn('reload',[x[0] for x in driver.calls])
+
+    def test_unresolved_author_layout_cannot_replay_persisted_activation(self):
+        driver=LayoutFake(resolves=False);driver.url='https://www.xiaohongshu.com/user/profile/'+'4'*24
+        self.binding['tabs']['detail']['last_url']=driver.url
+        with self.assertRaisesRegex(b.BridgeError,'BACKGROUND_LAYOUT_UNSETTLED'):
+            self.run_capture(driver,stage='author')
+        saved=json.loads((self.project.path/'bridge/bindings/test.json').read_text())
+        second=LayoutFake(resolves=False);second.url=driver.url
+        with self.assertRaisesRegex(b.BridgeError,'BACKGROUND_LAYOUT_UNSETTLED'):
+            self.run_capture(second,saved,stage='author')
+        self.assertNotIn('activate',[x[0] for x in second.calls])
+        self.assertNotIn('reload',[x[0] for x in driver.calls+second.calls])
 
 if __name__=='__main__':unittest.main()

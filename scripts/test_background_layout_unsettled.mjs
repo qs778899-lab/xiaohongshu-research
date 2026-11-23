@@ -3,8 +3,11 @@ import assert from 'node:assert/strict';
 import vm from 'node:vm';
 import {inspectDom,selectResults} from './xhs_bridge_driver.mjs';
 
-const uid='1'.repeat(24),query='Synthetic query';let checks=0;
+const uid='1'.repeat(24),author='4'.repeat(24),query='Synthetic query';let checks=0;
 function read(spec={}) {
+  const stage=spec.stage??'search';
+  const authorPath='/user/profile/'+author;
+  const route=spec.route??(stage==='author'?'user/profile/'+author:'search_result');
   const element=(rect={},style={})=>({rect:{x:0,y:0,width:1000,height:600,...rect},
     style:{display:'block',visibility:'visible',opacity:'1',position:'relative',transform:'none',overflowY:'visible',...style},
     clientWidth:1000,clientHeight:600,scrollHeight:1800,scrollTop:0,isConnected:true,parentElement:null,
@@ -20,7 +23,7 @@ function read(spec={}) {
     card.parentElement=scope;return card;
   });
   const links=wrappers.map((card,index)=>({innerText:'Synthetic card '+index,
-    href:'https://www.xiaohongshu.com/search_result/'+String(spec.sameId?10:10+index).padStart(24,'0'),
+    href:'https://www.xiaohongshu.com/'+route+'/'+String(spec.sameId?10:10+index).padStart(24,'0'),
     getClientRects:()=>[{}],closest:()=>spec.sameWrapper?wrappers[0]:card}));
   scope.querySelectorAll=selector=>selector==='a[href]'?links:[];
   scope.contains=card=>wrappers.includes(card);
@@ -31,10 +34,11 @@ function read(spec={}) {
       if(selector==='.feeds-container,.search-result-container')return [scope];
       return [];
     }};
-  const context={URL,document,location:{href:'https://www.xiaohongshu.com/search_result/?keyword='+encodeURIComponent(query)},
+  const context={URL,document,location:{href:'https://www.xiaohongshu.com'+(stage==='author'?authorPath:'/search_result/?keyword='+encodeURIComponent(query))},
     window:{innerWidth:1280,innerHeight:666},getComputedStyle:node=>node.style};
   vm.createContext(context);vm.runInContext('const selectResults='+selectResults.toString()+';globalThis.inspect='+inspectDom.toString(),context);
-  return context.inspect({uid,stage:'search',query,expectedPath:'/search_result/',backgroundText:spec.backgroundText??true,
+  return context.inspect({uid:spec.expectedUid??uid,stage,query:stage==='author'?undefined:query,
+    expectedPath:spec.expectedPath??(stage==='author'?authorPath:'/search_result/'),backgroundText:spec.backgroundText??true,
     guardOnly:spec.guardOnly??false});
 }
 for(const spec of [{},{zeroWrapper:true},{positions:[[0,0],[2,3],[4,5]]}]) {
@@ -53,4 +57,17 @@ for(const spec of [
   assert.equal(result.visible,false);checks++;
 }
 assert.equal(read({guardOnly:true}).error,'BACKGROUND_LAYOUT_UNSETTLED');checks++;
+// Author history uses the same masonry, with author-qualified note links.
+for(const spec of [{},{zeroWrapper:true},{route:'explore'},{route:'search_result'},{guardOnly:true}]) {
+  assert.equal(read({stage:'author',...spec}).error,'BACKGROUND_LAYOUT_UNSETTLED');checks++;
+}
+for(const spec of [
+  {positions:[[0,0],[260,0],[520,0]]},
+  {positions:[[0,-1800],[260,-1800],[0,-1400]]},
+  {sameId:true},{backgroundText:false},{backgroundText:'true'},
+]) {
+  assert.equal(read({stage:'author',...spec}).error,undefined);checks++;
+}
+assert.equal(read({stage:'author',expectedUid:'9'.repeat(24)}).error,'ACCOUNT_MISMATCH');checks++;
+assert.equal(read({stage:'author',expectedPath:'/user/profile/'+'8'.repeat(24)}).error,'TARGET_MISMATCH');checks++;
 console.log(`PASS: ${checks} background masonry-readiness cases; no Chrome/network or CSS mutation`);

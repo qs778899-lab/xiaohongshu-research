@@ -365,7 +365,7 @@ export function inspectDom(opts) {
     if(!viewportReady || !laidOut(content,listingScope) || listingScope &&
         (!laidOut(selection?.scope,true) || !laidOut(selection?.scroller) ||
          !(selection.scroller.clientWidth>0 && selection.scroller.clientHeight>0)))return {error:'CONTENT_LOADING'};
-    if(opts.stage==='search') {
+    if(listingScope) {
       // A positive overflow height alone does not prove the site's masonry
       // positioning has finished. Reuse the diagnostic's actual note wrappers.
       const cards=[],seen=new Set(),wrappers=new Set();let visited=0;
@@ -373,7 +373,7 @@ export function inspectDom(opts) {
         if(cards.length>=6 || visited++>=96)break;
         let url;try{url=new URL(link.href,location.href);}catch{continue;}
         const id=url.origin==='https://www.xiaohongshu.com' &&
-          url.pathname.match(/^\/(?:explore|search_result)\/([a-f0-9]{24})\/?$/)?.[1];
+          url.pathname.match(/^\/(?:explore|search_result|user\/profile\/[a-f0-9]{24})\/([a-f0-9]{24})\/?$/)?.[1];
         if(!id || seen.has(id))continue;
         const card=link.closest?.('section.note-item,.note-item');
         if(!card || wrappers.has(card) || !selection.scope.contains(card) || !laidOut(card))continue;
