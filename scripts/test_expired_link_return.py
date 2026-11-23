@@ -1,0 +1,52 @@
+import hashlib,json,tempfile,unittest
+from pathlib import Path
+from urllib.parse import urlencode
+from unittest.mock import patch
+import xhs_expired_link_return as expired
+import xhs_bridge as bridge
+import xhs_note_link_return as link
+import xhs_manual_tab_recovery as manual
+import test_source404_recovery as fixture
+
+class Tests(unittest.TestCase):
+    def test_exact_code_message_and_target(self):
+        failed='https://www.xiaohongshu.com/explore/'+'a'*24
+        target='https://www.xiaohongshu.com/explore/'+'b'*24
+        args=dict(redirectPath=failed,error_code='300017',error_msg='当前访问链接已失效',uuid='a'*36,verifyMsg='')
+        url=lambda q:'https://www.xiaohongshu.com/website-login/error?'+urlencode(q)
+        expired.validate_expired(url(args),failed,target)
+        for change in [dict(error_code='300031'),dict(verifyMsg='captcha'),dict(error_msg='访问受限'),dict(redirectPath=target),dict(extra='1')]:
+            with self.assertRaises(bridge.BridgeError):expired.validate_expired(url(dict(args,**change)),failed,target)
+        with self.assertRaises(bridge.BridgeError):expired.validate_expired(url(args),failed,failed)
+        with self.assertRaises(bridge.BridgeError):expired.validate_expired(url(args)+'&error_code=300017',failed,target)
+    def test_signed_observed_source_preferred_and_preserved(self):
+        with tempfile.TemporaryDirectory() as td:
+            p=Path(td);bare='https://www.xiaohongshu.com/explore/'+'a'*24;signed=bare+'?xsec_token=synthetic&xsec_source=pc_search'
+            raw=json.dumps({'first':bare,'later':signed}).encode();(p/'source.json').write_bytes(raw)
+            task={'payload':{'stage':'body','target':'a'*24,'bridge_url':bare,'provenance':[{'archive':'source.json','sha256':hashlib.sha256(raw).hexdigest()}]}}
+            self.assertEqual(bridge.observed_url(p,task),signed)
+            (p/'source.json').write_text('{}')
+            self.assertEqual(bridge.observed_url(p,task),bare)
+    def prepare(self):
+        f=fixture.ManualTests(methodName='runTest');f.setUp();self.addCleanup(f.doCleanups)
+        b=bridge.load_binding(f.p.path,f.name);b['last_error']['code']='ACCESS_STOP'
+        with expired.nr.locked_stops(b['profile_guard_key'],b['account_uid']) as keys:stops=expired.nr.current_stops(keys)
+        b['last_error']['at']=next(iter(stops.values()))['at'];bridge.save_binding(f.p.path,f.name,b)
+        args=dict(redirectPath=b['tabs']['detail']['navigation_intent']['url'],error_code='300017',error_msg='当前访问链接已失效',uuid='a'*36,verifyMsg='')
+        f.driver.url='https://www.xiaohongshu.com/website-login/error?'+urlencode(args)
+        return f,b
+    def test_no_grant_no_stop_or_binding_change_and_no_replay(self):
+        f,b=self.prepare();before=bridge.binding_path(f.p.path,f.name).read_bytes();calls=[]
+        def nav(binding,error,failed,target):calls.append(target);f.driver.url=target;return {'navigationSubmitted':True}
+        result=expired.restore(f.p.path,f.name,'Authorized return',nav,f.driver)
+        self.assertFalse(result['collection_permitted']);self.assertEqual(bridge.binding_path(f.p.path,f.name).read_bytes(),before);f.unchanged()
+        with self.assertRaisesRegex(bridge.BridgeError,'ALREADY_ATTEMPTED'):expired.restore(f.p.path,f.name,'Authorized return',nav,f.driver)
+        self.assertEqual(len(calls),1)
+    def test_unknown_navigation_is_never_replayed(self):
+        f,b=self.prepare();calls=[]
+        def nav(*args):calls.append(1);raise bridge.BridgeError('OUTCOME_UNKNOWN')
+        for _ in range(2):
+            with self.assertRaises(bridge.BridgeError):expired.restore(f.p.path,f.name,'Authorized return',nav,f.driver)
+        self.assertEqual(len(calls),1);f.unchanged()
+
+if __name__=='__main__':unittest.main()

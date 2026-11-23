@@ -191,3 +191,5 @@ references/note-link-validation.md
 scripts/xhs_account_state.py
 scripts/test_account_state.py
 references/account-state.md
+scripts/xhs_expired_link_return.py
+scripts/test_expired_link_return.py

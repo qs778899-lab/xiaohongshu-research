@@ -9,6 +9,14 @@ export function validateError(errorUrl,failedUrl,targetUrl) {
   const failed=new URL(failedUrl),target=new URL(targetUrl),e=new URL(errorUrl);
   const id=p=>p.match(/\/(?:explore|search_result)\/([a-f0-9]{24})\/?$/)?.[1];
   if(!id(failed.pathname)||!id(target.pathname)||id(failed.pathname)===id(target.pathname))throw new Error('DISTINCT_OBSERVED_NOTE_REQUIRED');
+  if(e.origin==='https://www.xiaohongshu.com'&&e.pathname==='/website-login/error') {
+    const allowed=['redirectPath','error_code','error_msg','uuid','verifyMsg'];
+    if(e.username||e.password||e.hash||[...e.searchParams.keys()].some(k=>!allowed.includes(k)||e.searchParams.getAll(k).length!==1)||
+       e.searchParams.get('redirectPath')!==failedUrl||e.searchParams.get('error_code')!=='300017'||
+       e.searchParams.get('error_msg')!=='当前访问链接已失效'||e.searchParams.get('verifyMsg')!==''||
+       !/^[a-f0-9-]{36}$/.test(e.searchParams.get('uuid')||''))throw new Error('EXACT_NOTE_LINK_ERROR_REQUIRED');
+    return;
+  }
   const allowed=['source','noteId','errorCode','xsec_token','xsec_source'];
   if(e.origin!=='https://www.xiaohongshu.com'||e.pathname!=='/404'||e.username||e.password||e.hash||
      [...e.searchParams.keys()].some(k=>!allowed.includes(k)||e.searchParams.getAll(k).length!==1)||
@@ -26,7 +34,8 @@ export function inspectError(opts) {
   const me=[...document.querySelectorAll('a[href*="/user/profile/"]')].find(e=>(e.innerText||'').trim()==='我');
   const uid=me?.href?.match(/\/user\/profile\/([a-f0-9]{24})/)?.[1];
   if(uid&&uid!==opts.uid)return {error:'ACCOUNT_MISMATCH'};
-  if(!/笔记不存在|当前笔记暂时无法浏览|页面不见了|无法浏览|无法查看|笔记已删除/.test(body))return {error:'NOTE_ERROR_TEXT_UNCONFIRMED',text:body.slice(0,1000)};
+  const expired=new URL(opts.errorUrl).searchParams.get('error_code')==='300017';
+  if(expired ? !/当前访问链接已失效/.test(body) : !/笔记不存在|当前笔记暂时无法浏览|页面不见了|无法浏览|无法查看|笔记已删除/.test(body))return {error:'NOTE_ERROR_TEXT_UNCONFIRMED',text:body.slice(0,1000)};
   return {url:location.href,uid:uid||null,text:body.slice(0,1000),noteErrorObserved:true};
 }
 

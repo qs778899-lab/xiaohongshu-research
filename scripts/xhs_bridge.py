@@ -841,7 +841,11 @@ def observed_url(project,task):
             if sha!=source.get('sha256'):continue
             try:candidates.extend(exact_target_observed_urls(json.loads(raw),stage,target,sha))
             except (ValueError,UnicodeError):pass
-    if candidates:return candidates[0]['normalized_url']
+    if candidates:
+        # Keep observed URLs intact; prefer a captured signed URL over a bare
+        # identifier link. Never synthesize, copy or renew an access token.
+        signed=[c for c in candidates if parse_qs(urlparse(c['normalized_url']).query).get('xsec_token')]
+        return (signed or candidates)[0]['normalized_url']
     raise BridgeError('OBSERVED_SOURCE_URL_REQUIRED')
 
 

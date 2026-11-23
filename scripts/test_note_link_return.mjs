@@ -22,3 +22,13 @@ for(const body of ['笔记不存在','安全验证 笔记不存在','无关页�
  assert.equal(r.noteErrorObserved===true,body==='笔记不存在');
 }
 console.log('18 note-error parsing, DOM restriction and bounded navigation scenarios passed');
+
+const expired='https://www.xiaohongshu.com/website-login/error?'+new URLSearchParams({redirectPath:failed,error_code:'300017',error_msg:'当前访问链接已失效',uuid:'a'.repeat(36),verifyMsg:''});
+validateError(expired,failed,target);
+for(const bad of [expired.replace('300017','300031'),expired+'&extra=1',expired.replace('verifyMsg=','verifyMsg=captcha'),expired+'&error_code=300017'])assert.throws(()=>validateError(bad,failed,target));
+globalThis.location={href:expired};
+for(const body of ['安全限制 当前访问链接已失效 300017','当前访问链接已失效 验证码','无关页面']) {
+ globalThis.document={body:{innerText:body},querySelectorAll:()=>[]};
+ assert.equal(inspectError({errorUrl:expired,uid:cfg.uid}).noteErrorObserved===true,body==='安全限制 当前访问链接已失效 300017');
+}
+console.log('Exact expired-link and verification rejection scenarios passed');
