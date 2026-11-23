@@ -362,31 +362,32 @@ def fork_binding(project,parent_name,name,intent,authorization,driver=None):
         parent=load_binding(project,parent_name)
         if (parent.get('web_parent_authorization') or parent.get('binding_kind')==nr.FORK_KIND
                 or nr.fork_path(project,'names',parent_name).exists()):raise BridgeError('FORK_RECURSION_FORBIDDEN')
-        if not parent.get('note_unavailable_recovery'):raise BridgeError('FORK_DIRECT_TYPED_PARENT_REQUIRED')
+        parent_kind,parent_grant=nr.fork_parent_reference(parent)
         # A different caller-supplied intent must not hide an unknown create.
         for prior_file in record_file.parent.glob('*.json'):
             if prior_file.name.endswith(('.home.json','.ready.json')):continue
             prior,prior_sha=nr.read_json(prior_file)
-            if prior.get('parent_name')==parent_name and prior.get('parent_grant')==parent['note_unavailable_recovery']:
+            if prior.get('parent_name')==parent_name and prior.get('parent_grant')==parent_grant and prior.get('parent_grant_type',nr.KIND)==parent_kind:
                 try:nr.completed_fork_home(project,prior_file,prior,prior_sha)
                 except (legacy.ResearchError,OSError,KeyError,TypeError):
                     raise BridgeError('FORK_PRIOR_OUTCOME_REQUIRES_DIAGNOSIS') from None
         with lease(project,parent) as keys:
             fresh=load_binding(project,parent_name)
-            if nr.fork_projection(fresh)!=nr.fork_projection(parent) or fresh.get('note_unavailable_recovery')!=parent.get('note_unavailable_recovery'):
+            if nr.fork_projection(fresh)!=nr.fork_projection(parent) or nr.fork_parent_reference(fresh)!=(parent_kind,parent_grant):
                 raise BridgeError('FORK_PARENT_AUTHORITY_CHANGED')
             p=native.open_lookup_project(project)
             try:
-                stop_hashes=nr.direct_web_exceptions(p,fresh,keys)
+                stop_hashes=nr.fork_parent_exceptions(p,fresh,keys)
                 session='xhs-'+uuid.uuid4().hex
                 b={k:fresh[k] for k in ('format','project','profile_label','context_id','account_uid','profile_guard_key','runtime','extension_version')}
                 b.update(binding_name=name,session=session,authorization=authorization,state='provisioning',tabs={},
-                         binding_kind=nr.FORK_KIND,created_at=legacy.now())
+                         binding_kind=nr.FORK_KIND if parent_kind==nr.KIND else nr.MANUAL_FORK_KIND,created_at=legacy.now())
+                if parent_kind!=nr.KIND:b['manual_excluded_note_ids']=list(fresh['manual_excluded_note_ids'])
                 if fresh.get('web_channel_authorization'):b['web_channel_authorization']=fresh['web_channel_authorization']
-                record={'kind':nr.FORK_KIND,'scope':'rendered_public_web_only','project':str(project),'intent_id':intent,
+                record={'kind':b['binding_kind'],'scope':'rendered_public_web_only','project':str(project),'intent_id':intent,
                         'parent_name':parent_name,'child_name':name,'authorization':authorization,'created_at':b['created_at'],
                         'parent_projection':nr.fork_projection(fresh),'child_projection':nr.fork_projection(b),
-                        'parent_grant':fresh['note_unavailable_recovery'],'stop_hashes':stop_hashes,
+                        'parent_grant':parent_grant,'parent_grant_type':parent_kind,'stop_hashes':stop_hashes,
                         'parent_binding_sha256_at_intent':hashlib.sha256(binding_path(project,parent_name).read_bytes()).hexdigest()}
                 sha=nr.immutable(record_file,record);pointer={'file':str(record_file),'sha256':sha}
                 nr.immutable(name_file,pointer);b['web_parent_authorization']=pointer;save_binding(project,name,b)

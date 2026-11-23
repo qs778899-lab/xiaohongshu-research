@@ -111,3 +111,9 @@ xhs_project_tab.py --project P --parent-project SOURCE --binding CURRENT_PARENT 
 ### 正文导航前页面已变、原搜索页已恢复
 
 `resume-note --inspection 原search-probe.json` 只接续原 `probe-note` 在首个元数据检查报 `MANUAL_PAGE_CHANGED` 的情况：没有导航、正文捕获或后续元数据记录，变更页必须是同次搜索已经观察的正常候选。它保留原尝试、错误和消费记录，在独立子目录只允许一次接续，实时核对原搜索地址、页面和同账号后打开原计划的同一完整卡片链接。原搜索未恢复、验证码、新 STOP、目标变更或未知导航均停止；不能借此改换帖子或重放失败导航。成功仍须实际审读正文并 attest，不完成评论或媒体。
+
+### 已核验用户标签的独立研究标签
+
+当用户标签正文可读，但上游拒绝在该租约中选择标签时，可对当前有效的 manual 网页绑定使用既有 `fork-binding --parent ORIGINAL --binding CHILD --intent STABLE_INTENT --authorization "实际授权依据"`。新标签由本专项创建，原用户标签不选择、不导航、不关闭。父手动恢复凭据、全部 STOP 和原受限笔记清单在每次子租约中重新核对；子标签须实际核对首页 UID，并再次读取真实正文。创建结果不明保留消费记录，不换名字重试。
+
+这不是账号恢复入口：父凭据已过期、出现新 STOP 或账号状态未知时仍拒绝；必须先完成原网页恢复核验。旧 300031 父凭据的派生接口和已保存记录继续有效。

@@ -20,6 +20,8 @@ import xhs_project as xp
 
 KIND='single_note_300031_rendered_web_recovery_v1'
 FORK_KIND='single_note_300031_rendered_web_binding_fork_v1'
+MANUAL_FORK_KIND='manual_restored_public_web_binding_fork_v1'
+FORK_KINDS={FORK_KIND,MANUAL_FORK_KIND}
 STOP_REASON='Observed browser login/verification/access restriction'
 
 
@@ -318,7 +320,7 @@ def attest(project,name,probe_file,review_file):
 
 def direct_web_exceptions(p,b,keys):
     """Validate the original grant under the caller's already held account locks."""
-    require(not b.get('web_parent_authorization') and b.get('binding_kind')!=FORK_KIND,
+    require(not b.get('web_parent_authorization') and b.get('binding_kind') not in FORK_KINDS,
             'FORK_PARENT_MUST_HAVE_DIRECT_GRANT')
     pointer=b.get('note_unavailable_recovery',{})
     require(re.fullmatch(r'[a-f0-9]{64}',pointer.get('sha256','')),'RECOVERY_GRANT_HASH_REQUIRED')
@@ -341,16 +343,38 @@ def fork_path(project,category,name):
     return path
 
 
+def fork_parent_reference(b):
+    require(not b.get('web_parent_authorization') and b.get('binding_kind') not in FORK_KINDS,
+            'FORK_RECURSION_FORBIDDEN')
+    if b.get('manual_tab_revalidation'):
+        from xhs_manual_tab_recovery import GRANT_KIND
+        require(b.get('binding_kind')==GRANT_KIND and not b.get('note_unavailable_recovery'),
+                'FORK_MANUAL_PARENT_REQUIRED')
+        return GRANT_KIND,b['manual_tab_revalidation']
+    require(bool(b.get('note_unavailable_recovery')),'FORK_DIRECT_TYPED_PARENT_REQUIRED')
+    return KIND,b['note_unavailable_recovery']
+
+
+def fork_parent_exceptions(p,b,keys):
+    kind,_=fork_parent_reference(b)
+    if kind==KIND:return direct_web_exceptions(p,b,keys)
+    from xhs_manual_tab_recovery import web_exceptions as manual_exceptions
+    return manual_exceptions(p.path,b,keys)
+
+
 def fork_projection(b):
     # Ordinary tab URLs/last_error/state are deliberately mutable. Authority is not.
-    return {k:b.get(k) for k in ('format','project','binding_name','profile_label','context_id','account_uid',
+    value={k:b.get(k) for k in ('format','project','binding_name','profile_label','context_id','account_uid',
         'profile_guard_key','session','runtime','extension_version','web_channel_authorization','authorization')}
+    # Preserve old direct-grant records byte-for-byte when this field was absent.
+    if 'manual_excluded_note_ids' in b:value['manual_excluded_note_ids']=b['manual_excluded_note_ids']
+    return value
 
 
 def completed_fork_home(project,record_file,record,sha):
     """Immutable creation result, independent of later mutable page/task faults."""
     expected=fork_path(project,'intents',record.get('intent_id'));b=record.get('child_projection',{})
-    require(Path(record_file)==expected and record.get('kind')==FORK_KIND
+    require(Path(record_file)==expected and record.get('kind') in FORK_KINDS
             and record.get('scope')=='rendered_public_web_only' and record.get('project')==str(Path(project).resolve())
             and b.get('binding_name')==record.get('child_name'),'FORK_SCOPE_CHANGED')
     pointer={'file':str(expected),'sha256':sha}
@@ -380,11 +404,11 @@ def completed_fork_home(project,record_file,record,sha):
 
 def fork_authority(p,b,keys,home_required=True):
     """Nonrecursive delegation, checked afresh on every rendered-web lease."""
-    require(b.get('binding_kind')==FORK_KIND and not b.get('note_unavailable_recovery'),'FORK_TYPED_CHILD_REQUIRED')
+    require(b.get('binding_kind') in FORK_KINDS and not b.get('note_unavailable_recovery') and not b.get('manual_tab_revalidation'),'FORK_TYPED_CHILD_REQUIRED')
     pointer=b.get('web_parent_authorization',{})
     record,sha=read_json(pointer.get('file',''),pointer.get('sha256'))
     require(pointer.get('sha256')==sha and re.fullmatch(r'[a-f0-9]{64}',sha),'FORK_RECORD_HASH_REQUIRED')
-    require(record.get('kind')==FORK_KIND and record.get('scope')=='rendered_public_web_only'
+    require(record.get('kind') in FORK_KINDS and record.get('scope')=='rendered_public_web_only'
             and record.get('project')==str(p.path.resolve()) and record.get('child_name')==b['binding_name'],
             'FORK_SCOPE_CHANGED')
     expected=fork_path(p.path,'intents',record.get('intent_id'))
@@ -395,7 +419,14 @@ def fork_authority(p,b,keys,home_required=True):
     parent=bridge.load_binding(p.path,record.get('parent_name'))
     require(not fork_path(p.path,'names',parent['binding_name']).exists(),'FORK_RECURSION_FORBIDDEN')
     require(fork_projection(parent)==record.get('parent_projection'),'FORK_PARENT_AUTHORITY_CHANGED')
-    require(parent.get('note_unavailable_recovery')==record.get('parent_grant'),'FORK_PARENT_GRANT_CHANGED')
+    parent_kind,parent_grant=fork_parent_reference(parent)
+    require(parent_kind==record.get('parent_grant_type',KIND) and parent_grant==record.get('parent_grant'),
+            'FORK_PARENT_GRANT_CHANGED')
+    expected_kind=FORK_KIND if parent_kind==KIND else MANUAL_FORK_KIND
+    require(record.get('kind')==b.get('binding_kind')==expected_kind,'FORK_PARENT_KIND_CHANGED')
+    if expected_kind==MANUAL_FORK_KIND:
+        require(b.get('manual_excluded_note_ids')==parent.get('manual_excluded_note_ids'),
+                'FORK_MANUAL_EXCLUSIONS_CHANGED')
     require(all(b.get(k)==parent.get(k) for k in ('format','project','profile_label','context_id','account_uid',
                 'profile_guard_key','runtime','extension_version','web_channel_authorization'))
             and b.get('binding_name')!=parent.get('binding_name') and b.get('session')!=parent.get('session'),
@@ -403,7 +434,7 @@ def fork_authority(p,b,keys,home_required=True):
     require(record.get('authorization')==b.get('authorization') and isinstance(b.get('authorization'),str)
             and b['authorization'].strip(),'FORK_AUTHORIZATION_BASIS_REQUIRED')
     bridge.web_authorization_exceptions(p.path,parent)
-    stops=direct_web_exceptions(p,parent,keys)
+    stops=fork_parent_exceptions(p,parent,keys)
     require(stops==record.get('stop_hashes'),'FORK_STOP_SET_CHANGED')
     if not home_required:return stops
     home,home_pointer=completed_fork_home(p.path,expected,record,sha)
