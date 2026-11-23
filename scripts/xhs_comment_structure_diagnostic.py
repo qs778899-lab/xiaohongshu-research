@@ -65,6 +65,36 @@ def stop_fingerprint(keys):
     return result
 
 
+def validate_empty_ui_probe(value):
+    """Accept the fixed DOM probe's bounded structure, never arbitrary text."""
+    fields={'diagnosticOnly','phraseKind','scopeBasis','scrollerVisible','limits','scannedNodes','truncated','nodes'}
+    limits={'scannedNodes':240,'matches':4,'ancestors':4,'classes':6,'classCharacters':64}
+    require(isinstance(value,dict) and set(value)==fields
+        and value['diagnosticOnly'] is True and value['phraseKind']=='wasteland_click_comment'
+        and value['scopeBasis']=='fixed_comment_and_body_selectors'
+        and value['limits']==limits,'DIAGNOSTIC_EMPTY_UI_PROBE_SCHEMA_REQUIRED')
+    require(type(value['scrollerVisible']) is bool and type(value['truncated']) is bool
+        and type(value['scannedNodes']) is int and 0<=value['scannedNodes']<=limits['scannedNodes']
+        and isinstance(value['nodes'],list) and len(value['nodes'])<=limits['matches'],
+        'DIAGNOSTIC_EMPTY_UI_PROBE_BOUNDS_REQUIRED')
+    def node_info(node,fields):
+        require(isinstance(node,dict) and set(node)==fields
+            and isinstance(node['tag'],str) and node['tag'] in {'DIV','SPAN','P','BUTTON','SECTION','OTHER'}
+            and isinstance(node['classes'],list) and len(node['classes'])<=limits['classes']
+            and all(isinstance(c,str) and len(c)<=limits['classCharacters']
+                and re.fullmatch(r'[A-Za-z_][A-Za-z0-9_-]*',c)
+                and not re.search(r'[a-f0-9]{16}',c,re.I) for c in node['classes']),
+            'DIAGNOSTIC_EMPTY_UI_NODE_SCHEMA_REQUIRED')
+    for node in value['nodes']:
+        node_info(node,{'tag','classes','ancestors','insideComment','insideBody','insideExistingCommentContainer'})
+        require(all(type(node[k]) is bool for k in ['insideComment','insideBody','insideExistingCommentContainer'])
+            and isinstance(node['ancestors'],list) and len(node['ancestors'])<=limits['ancestors'],
+            'DIAGNOSTIC_EMPTY_UI_NODE_BOUNDS_REQUIRED')
+        for ancestor in node['ancestors']:node_info(ancestor,{'tag','classes'})
+    require(value['scrollerVisible'] or value['scannedNodes']==0 and not value['nodes'] and not value['truncated'],
+        'DIAGNOSTIC_HIDDEN_EMPTY_UI_SCAN_FORBIDDEN')
+
+
 def validate_structure(b,context,value):
     require(value.get('uid')==b['account_uid'] and note(value.get('url'))==context['target']
             and not value.get('error'),'DIAGNOSTIC_GUARD_OR_TARGET_CHANGED')
@@ -72,7 +102,8 @@ def validate_structure(b,context,value):
             and value.get('repairVerified') is False,'DIAGNOSTIC_CLOSED_RESULT_REQUIRED')
     require(set(value)<=set(['url','uid','diagnosticOnly','pageVisible','commentContainer','rootNodeCount','rootIds',
         'loadingVisible','countHeading','interactionCount','messages','unrecognizedUiText','endSignalVisible',
-        'noteScroller','documentTimeOrigin','collectionPermitted','repairVerified']), 'DIAGNOSTIC_UNEXPECTED_CONTENT_FIELD')
+        'noteScroller','emptyUiProbe','documentTimeOrigin','collectionPermitted','repairVerified']), 'DIAGNOSTIC_UNEXPECTED_CONTENT_FIELD')
+    if 'emptyUiProbe' in value:validate_empty_ui_probe(value['emptyUiProbe'])
     require(type(value.get('rootNodeCount')) is int and value['rootNodeCount']>=0
             and isinstance(value.get('rootIds'),list) and len(value['rootIds'])<=3
             and all(re.fullmatch('[a-fA-F0-9]{16,40}',str(cid)) for cid in value['rootIds']),

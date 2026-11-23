@@ -4,6 +4,8 @@ import copy
 import hashlib
 import json
 from pathlib import Path
+import shutil
+import subprocess
 import unittest
 from unittest.mock import patch
 
@@ -138,5 +140,77 @@ class Tests(unittest.TestCase):
         self.p.db.execute('UPDATE tasks SET payload=? WHERE id=?',(xp.dumps(payload),self.tid));self.p.db.commit();driver=Fake()
         with self.assertRaisesRegex(bridge.BridgeError,'ORIGINAL_HELD_ROOT'):self.run_diag(driver)
         self.assertEqual(driver.calls,[])
+
+    def probe(self):
+        return {'diagnosticOnly':True,'phraseKind':'wasteland_click_comment',
+            'scopeBasis':'fixed_comment_and_body_selectors','scrollerVisible':True,
+            'limits':{'scannedNodes':240,'matches':4,'ancestors':4,'classes':6,'classCharacters':64},
+            'scannedNodes':3,'truncated':False,'nodes':[{'tag':'DIV','classes':['empty-container'],
+                'ancestors':[{'tag':'DIV','classes':['note-scroller']}],
+                'insideComment':False,'insideBody':False,'insideExistingCommentContainer':True}]}
+
+    def test_actual_dom_producer_result_passes_python_contract(self):
+        node=shutil.which('node')
+        if not node:self.skipTest('Node runtime is not installed')
+        module=Path(__file__).with_name('xhs_bridge_driver.mjs').as_uri()
+        code=f'''import {{commentStructureDom}} from {json.dumps(module)};
+globalThis.document={{hidden:false,querySelector:()=>null}};
+console.log(JSON.stringify(commentStructureDom()));'''
+        process=subprocess.run([node,'--input-type=module','-e',code],check=True,capture_output=True,text=True)
+        value=json.loads(process.stdout)
+        value.update(uid=fixture.UID,url=URL)
+        b=bridge.load_binding(self.p.path,self.name)
+        context=diag.source_context(self.p,b,self.tid,self.sha)
+        diag.validate_structure(b,context,value)
+        self.assertFalse(value['collectionPermitted']);self.assertFalse(value['repairVerified'])
+        self.assertEqual(value['emptyUiProbe']['nodes'],[])
+
+    def test_bounded_probe_is_saved_without_unlocking_or_retry(self):
+        probe=self.probe()
+        class Current(Fake):
+            def call(self,action,b,role,**kw):
+                value=super().call(action,b,role,**kw)
+                if action=='comment_diagnose':value['emptyUiProbe']=probe
+                return value
+        driver=Current();result=self.run_diag(driver)
+        self.assertEqual(json.loads(Path(result['structure_file']).read_text())['emptyUiProbe'],probe)
+        self.assertEqual(tuple(self.before),tuple(self.row()));self.base.unchanged()
+        with self.assertRaisesRegex(bridge.BridgeError,'ALREADY_ATTEMPTED'):self.run_diag(driver)
+        self.assertEqual([x[0] for x in driver.calls],['metadata','identity','comment_diagnose'])
+
+    def test_probe_cannot_smuggle_nested_content_or_links(self):
+        for change in ['text','url','ancestor_text','classes','hash_class','unicode_class','tag','tag_object']:
+            value=self.probe();node=value['nodes'][0]
+            if change=='text':node['text']='Synthetic unrelated content'
+            elif change=='url':node['url']='https://example.invalid/'
+            elif change=='ancestor_text':node['ancestors'][0]['text']='Synthetic content'
+            elif change=='classes':node['classes']=['https://example.invalid/']
+            elif change=='hash_class':node['classes']=['a'*24]
+            elif change=='unicode_class':node['classes']=['x名称']
+            elif change=='tag':node['tag']='SCRIPT'
+            else:node['tag']={}
+            with self.subTest(change=change),self.assertRaises(bridge.BridgeError):diag.validate_empty_ui_probe(value)
+
+    def test_probe_rejects_unbounded_and_mistyped_structure(self):
+        cases=[]
+        for key,val in [('scannedNodes',241),('scannedNodes',True),('nodes',self.probe()['nodes']*5),
+                        ('scrollerVisible',1),('truncated','false'),('phraseKind','arbitrary_text')]:
+            value=self.probe();value[key]=val;cases.append(value)
+        value=self.probe();value['limits']['scannedNodes']=10000;cases.append(value)
+        value=self.probe();value['nodes'][0]['ancestors']*=5;cases.append(value)
+        value=self.probe();value['nodes'][0]['classes']*=7;cases.append(value)
+        value=self.probe();value['nodes'][0]['insideComment']=0;cases.append(value)
+        for value in cases:
+            with self.subTest(value=value),self.assertRaises(bridge.BridgeError):diag.validate_empty_ui_probe(value)
+
+    def test_hidden_probe_cannot_claim_scan_or_nodes(self):
+        value=self.probe();value['scrollerVisible']=False
+        with self.assertRaisesRegex(bridge.BridgeError,'HIDDEN_EMPTY_UI_SCAN'):diag.validate_empty_ui_probe(value)
+        value.update(scannedNodes=0,nodes=[],truncated=False);diag.validate_empty_ui_probe(value)
+
+    def test_old_results_without_optional_probe_remain_valid(self):
+        b=bridge.load_binding(self.p.path,self.name);context=diag.source_context(self.p,b,self.tid,self.sha)
+        value=Fake().call('comment_diagnose',b,'detail',stage='body',expectedPath='/explore/'+fixture.NOTE)
+        self.assertNotIn('emptyUiProbe',value);diag.validate_structure(b,context,value)
 
 if __name__=='__main__':unittest.main()
