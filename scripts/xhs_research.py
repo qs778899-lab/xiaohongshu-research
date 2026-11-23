@@ -25,6 +25,13 @@ _ACCOUNT_LOCKS = {}
 
 def account_root():
     """Shared on this machine, outside short-lived research runs. No cookies."""
+    from xhs_account_state import configured_root
+    try:
+        configured = configured_root()
+    except ValueError as exc:
+        raise ResearchError(str(exc)) from None
+    if configured is not None:
+        return configured
     root = Path(tempfile.gettempdir()) / ("xhs-research-accounts-" + str(os.getuid()))
     if root.is_symlink():
         raise ResearchError("Account guard directory must not be a symlink")

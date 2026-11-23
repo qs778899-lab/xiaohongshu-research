@@ -33,6 +33,8 @@ xhs_batch.py --project P work --transport bridge --binding NEW --task-list TASKS
 
 ## 本地错误和接续
 
+正常正文也可作为 `probe-search` 的已核验起点，仍只导航到一个既有查询。若导航已成功且精确页面未变，失败仅为 `BACKGROUND_LAYOUT_UNSETTLED` 或 `CONTENT_LOADING`，在 Codex 实际确认同账号搜索结果恢复显示后，可执行 `finish-search --inspection I --layout-observation OBS`。观察须记录 reader、account_uid、url、observed_at、normal_search_visible、no_access_warning、window_restored 和实际摘要。只读取原页一次，不重放导航；原失败、消费记录和全部 STOP 保留。验证码、账号变化及未知导航不适用。
+
 搜索页末尾斜杠、同一 note ID 的 `/search_result/ID` 与 `/explore/ID` 是等价路径；查询、笔记 ID、账号或验证码路径不同不等价。已保存捕获遇这种本地路径误判时，`finish-search` 只读取已导航页面，`finish-note` 仅验证已保存原文；不重放导航，保留原失败记录。
 
 正常笔记可以没有标题。标题字段明确存在且是空字符串时，健康检查仍要求正文非空、正文阶段及有效公开作者链接，不能以加载中、缺字段或图片占位代替正文。若旧校验已归档 `MANUAL_NOTE_CONTENT_REQUIRED`，且保存的首份正文只有标题为空，可对原 `search-probe.json` 执行 `finish-note --inspection ...`：只核原卡片、导航、页面、账号、正文和冻结 STOP，不调用浏览器，不重放导航或补造标题。原失败和全部来源保留，完成后仍须实际审读正文并 `attest`；动态媒体和评论不会由此记已读。新的访问提示、空正文、错目标或结果不明不适用。

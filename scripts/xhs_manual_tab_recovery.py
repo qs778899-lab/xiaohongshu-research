@@ -276,7 +276,9 @@ def inspect_active(project,parent_name,user_file,parent_project=None):
 def probe_search(inspection_file,task_id):
     inspected,_=nr.read_json(inspection_file)
     attempt=check_pointer(inspected['attempt']);loaded=check_pointer(inspected['capture'])
-    nr.require(proof_args(loaded['url'])['stage']=='home','MANUAL_HOME_INSPECTION_REQUIRED')
+    loaded_args=proof_args(loaded['url'])
+    nr.require(loaded_args['stage'] in {'home','body'},'MANUAL_HOME_OR_BODY_INSPECTION_REQUIRED')
+    require_capture(loaded,inspected['binding'],loaded_args)
     b=inspected['binding'];root=Path(inspection_file).parent
     db=xp.Project(b['project'])
     try:task=db.task(task_id)
@@ -292,7 +294,8 @@ def probe_search(inspection_file,task_id):
         try:
             meta=driver.call('metadata',b,'detail');evidence(root/'search-before.json',meta)
             nr.require(meta.get('url')==loaded['url'],'MANUAL_PAGE_CHANGED')
-            driver.call('identity',b,'detail')
+            ident=driver.call('identity',b,'detail')
+            nr.require(ident.get('uid')==b['account_uid'],'MANUAL_IDENTITY_CHANGED')
             evidence(root/'search-navigation.json',driver.call('navigate',b,'detail',url=url))
             time.sleep(1)
             for index in range(3):
@@ -371,24 +374,38 @@ def probe_note(inspection_file,url):
             raise
         finally:driver.close()
 
-def finish_search(inspection_file):
-    """Finish read after a proven trailing-slash redirect; never re-navigate."""
+def finish_search(inspection_file,layout_observation=None):
+    """One same-page read after equivalent redirect or observed layout recovery."""
     inspected,_=nr.read_json(inspection_file);root=Path(inspection_file).parent
     attempt=check_pointer(inspected['attempt']);b=inspected['binding']
     failure,_=nr.read_json(root/'search-failure.json')
     nav,_=nr.read_json(root/'search-navigation.json')
     previous,_=nr.read_json(root/'search-metadata-0.json')
     started,_=nr.read_json(root/'search-attempt.json')
-    nr.require(failure.get('error')=='MANUAL_QUERY_CHANGED' and nav.get('navigationSubmitted') is True,
+    local_layout=failure.get('error') in {'BACKGROUND_LAYOUT_UNSETTLED','CONTENT_LOADING'}
+    nr.require((failure.get('error')=='MANUAL_QUERY_CHANGED' or (local_layout and layout_observation))
+               and nav.get('navigationSubmitted') is True,
                'MANUAL_READ_CONTINUATION_NOT_APPLICABLE')
     args=proof_args(started['url'])
     nr.require(proof_args(previous['url'])==args and previous.get('page')==b['tabs']['detail']['page'],
                'MANUAL_REDIRECT_NOT_EQUIVALENT')
+    observation_ref=None
+    if local_layout:
+        observed,_=nr.read_json(layout_observation)
+        nr.require(observed.get('reader')=='codex' and observed.get('account_uid')==b['account_uid']
+                   and observed.get('normal_search_visible') is True and observed.get('no_access_warning') is True
+                   and observed.get('window_restored') is True and bool(observed.get('summary')),
+                   'MANUAL_LAYOUT_OBSERVATION_REQUIRED')
+        nr.require(proof_args(observed.get('url',''))==args
+                   and nr.stamp(observed.get('observed_at'))>nr.stamp(failure['at']),
+                   'MANUAL_LAYOUT_OBSERVATION_SCOPE_CHANGED')
+        observation_ref=pointer(layout_observation)
     with nr.locked_stops(b['profile_guard_key'],b['account_uid']) as keys:
         nr.require(nr.current_stops(keys)==attempt['stops'],'MANUAL_STOP_CHANGED')
         nr.require(not (root/'search-read-continuation.json').exists(),'MANUAL_READ_ALREADY_CONTINUED')
         evidence(root/'search-read-continuation.json',{'at':xp.legacy.now(),'failure':pointer(root/'search-failure.json'),
-                'previous_metadata':pointer(root/'search-metadata-0.json'),'navigation':False})
+                'previous_metadata':pointer(root/'search-metadata-0.json'),'navigation':False,
+                **({'layout_observation':observation_ref} if observation_ref else {})})
         driver=bridge.Driver(b['runtime'])
         try:
             meta=driver.call('metadata',b,'detail');evidence(root/'search-resumed-metadata.json',meta)
@@ -766,7 +783,7 @@ def main():
     s=sub.add_parser('finish-inspection');s.add_argument('--attempt',type=Path,required=True);s.add_argument('--verify-focus',action='store_true')
     s=sub.add_parser('probe-note');s.add_argument('--inspection',type=Path,required=True);s.add_argument('--url',required=True)
     s=sub.add_parser('probe-search');s.add_argument('--inspection',type=Path,required=True);s.add_argument('--task',required=True)
-    s=sub.add_parser('finish-search');s.add_argument('--inspection',type=Path,required=True)
+    s=sub.add_parser('finish-search');s.add_argument('--inspection',type=Path,required=True);s.add_argument('--layout-observation',type=Path)
     s=sub.add_parser('resume-verified-search');s.add_argument('--inspection',type=Path,required=True);s.add_argument('--user',type=Path,required=True)
     s=sub.add_parser('finish-note');s.add_argument('--inspection',type=Path,required=True)
     s=sub.add_parser('attest');s.add_argument('--probe',type=Path,required=True);s.add_argument('--review',type=Path,required=True);s.add_argument('--binding',required=True)
@@ -776,7 +793,7 @@ def main():
     elif a.command=='inspect-active':result=inspect_active(a.project,a.binding,a.user,a.parent_project)
     elif a.command=='finish-inspection':result=finish_inspection(a.attempt,a.verify_focus)
     elif a.command=='probe-search':result=probe_search(a.inspection,a.task)
-    elif a.command=='finish-search':result=finish_search(a.inspection)
+    elif a.command=='finish-search':result=finish_search(a.inspection,a.layout_observation)
     elif a.command=='resume-verified-search':result=resume_verified_search(a.inspection,a.user)
     elif a.command=='finish-note':result=finish_note(a.inspection)
     elif a.command=='attest':result=attest(a.probe,a.review,a.binding)

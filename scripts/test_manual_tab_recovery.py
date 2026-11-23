@@ -290,6 +290,59 @@ class ManualTabTests(unittest.TestCase):
         self.assertEqual(before,self.stop.read_bytes())
         self.assertEqual(len(list((self.p/'bridge/manual-active-observations').glob('*.json'))),1)
 
+    def body_search_fixture(self):
+        self.url='https://www.xiaohongshu.com/explore/'+'5'*24
+        self.meta.write_text(json.dumps({'metadata':{'tabs':[{'tabId':11,'windowId':22,'url':self.url,'active':True}]}}))
+        self.capture={'uid':self.uid,'url':self.url,'stage':'body','title':'Normal source',
+                      'body':'Saved source text','authors':[{'name':'Example'}]}
+        inspected=self.run_inspect()['inspection']
+        case=self
+        class Driver:
+            url=case.url
+            def __init__(self,*args):pass
+            def close(self):pass
+            def call(self,action,b=None,role=None,**kw):
+                case.calls.append(action)
+                if action=='metadata':return {'url':self.url,'page':'A'*32}
+                if action=='identity':return {'uid':case.identity_uid}
+                if action=='navigate':self.url=kw['url'];return {'url':self.url,'navigationSubmitted':True}
+                if action=='capture':return {'uid':case.uid,'url':self.url,'cards':[{'url':'https://www.xiaohongshu.com/explore/'+'6'*24}]}
+                raise AssertionError(action)
+        class Project:
+            def __init__(self,*args):pass
+            def task(self,*args):return {'kind':'native','payload':{'stage':'search'}}
+            def close(self):pass
+        return inspected,Driver,Project
+
+    def test_existing_normal_body_can_start_bounded_search_revalidation(self):
+        inspected,driver,project=self.body_search_fixture()
+        with self.mocks(),patch.object(bridge,'Driver',driver),patch.object(xp,'Project',project),\
+             patch.object(bridge,'observed_url',return_value='https://www.xiaohongshu.com/search_result?keyword=test'),\
+             patch.object(m.time,'sleep'):
+            result=m.probe_search(inspected,'existing')
+            self.assertFalse(result['collection_permitted'])
+            with self.assertRaisesRegex(bridge.BridgeError,'ALREADY_ATTEMPTED'):
+                m.probe_search(inspected,'existing')
+        self.assertEqual(self.calls.count('navigate'),1)
+
+    def test_account_change_before_search_prevents_navigation(self):
+        inspected,driver,project=self.body_search_fixture();self.identity_uid='9'*24
+        with self.mocks(),patch.object(bridge,'Driver',driver),patch.object(xp,'Project',project),\
+             patch.object(bridge,'observed_url',return_value='https://www.xiaohongshu.com/search_result?keyword=test'):
+            with self.assertRaisesRegex(bridge.BridgeError,'IDENTITY_CHANGED'):
+                m.probe_search(inspected,'existing')
+        self.assertNotIn('navigate',self.calls)
+
+    def test_unready_body_cannot_be_used_for_search_revalidation(self):
+        inspected,_,_=self.body_search_fixture()
+        obj=json.loads(Path(inspected).read_text())
+        raw=json.loads(Path(obj['capture']['file']).read_text());raw['loading']=True
+        capture=self.put('unready.json',raw);obj['capture']=m.pointer(capture)
+        bad=self.put('unready-inspection.json',obj);before=list(self.calls)
+        with self.assertRaisesRegex(bridge.BridgeError,'CAPTURE_FAILED'):
+            m.probe_search(bad,'existing')
+        self.assertEqual(self.calls,before)
+
     def test_captcha_is_a_failure_and_not_retryable(self):
         self.error='ACCESS_STOP'
         with self.assertRaises(bridge.BridgeError):self.run_inspect()
@@ -325,6 +378,50 @@ class ManualTabTests(unittest.TestCase):
         a='https://www.xiaohongshu.com/search_result?keyword=test&type=51'
         self.assertEqual(m.proof_args(a),m.proof_args(self.url))
         self.assertNotEqual(m.proof_args(a),m.proof_args(a.replace('test','different')))
+
+    def layout_failure_fixture(self):
+        inspected,driver,project=self.body_search_fixture()
+        class Loading(driver):
+            def call(self,action,*args,**kwargs):
+                if action=='capture':raise bridge.BridgeError('BACKGROUND_LAYOUT_UNSETTLED')
+                return super().call(action,*args,**kwargs)
+        query='https://www.xiaohongshu.com/search_result?keyword=test'
+        with self.mocks(),patch.object(bridge,'Driver',Loading),patch.object(xp,'Project',project),\
+             patch.object(bridge,'observed_url',return_value=query),patch.object(m.time,'sleep'):
+            with self.assertRaisesRegex(bridge.BridgeError,'LAYOUT_UNSETTLED'):
+                m.probe_search(inspected,'existing')
+        driver.url=query
+        observed=self.put('layout-observation.json',{'reader':'codex','account_uid':self.uid,'url':query,
+            'normal_search_visible':True,'window_restored':True,'no_access_warning':True,
+            'summary':'Original query cards visible after selecting the exact task window.',
+            'observed_at':'2099-01-01T00:00:00+00:00'})
+        return inspected,driver,observed
+
+    def test_observed_layout_recovery_reads_same_search_once_without_navigation(self):
+        inspected,driver,observed=self.layout_failure_fixture()
+        before=self.calls.count('navigate')
+        with self.mocks(),patch.object(bridge,'Driver',driver):
+            result=m.finish_search(inspected,observed)
+            self.assertFalse(result['collection_permitted'])
+            with self.assertRaisesRegex(bridge.BridgeError,'ALREADY_CONTINUED'):
+                m.finish_search(inspected,observed)
+        self.assertEqual(self.calls.count('navigate'),before)
+
+    def test_layout_recovery_requires_current_matching_observation(self):
+        inspected,_,observed=self.layout_failure_fixture()
+        original=json.loads(observed.read_text())
+        for change in [{'account_uid':'9'*24},{'url':'https://www.xiaohongshu.com/search_result?keyword=other'},
+                       {'observed_at':'2000-01-01T00:00:00Z'},{'normal_search_visible':False}]:
+            observed.write_text(json.dumps(original|change))
+            with self.assertRaises(bridge.BridgeError):m.finish_search(inspected,observed)
+        self.assertFalse((Path(inspected).parent/'search-read-continuation.json').exists())
+
+    def test_layout_observation_cannot_override_captcha_failure(self):
+        inspected,_,observed=self.layout_failure_fixture()
+        failure=Path(inspected).parent/'search-failure.json'
+        data=json.loads(failure.read_text());data['error']='ACCESS_STOP';failure.write_text(json.dumps(data))
+        with self.assertRaisesRegex(bridge.BridgeError,'NOT_APPLICABLE'):
+            m.finish_search(inspected,observed)
 
     def test_access_warning_url_is_never_a_normalization_exception(self):
         with self.assertRaises(bridge.BridgeError):

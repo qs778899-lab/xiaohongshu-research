@@ -188,3 +188,6 @@ scripts/xhs_note_link_return.mjs
 scripts/test_note_link_return.py
 scripts/test_note_link_return.mjs
 references/note-link-validation.md
+scripts/xhs_account_state.py
+scripts/test_account_state.py
+references/account-state.md
