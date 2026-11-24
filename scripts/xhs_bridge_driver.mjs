@@ -19,9 +19,12 @@ export function publicUrl(value) {
       (u.pathname.startsWith('/website-login/') || /^\/login\/?$/.test(u.pathname) || u.searchParams.has('error_code')))
     throw new Error('ACCESS_STOP');
   if (u.protocol !== 'https:' || u.hostname !== 'www.xiaohongshu.com' || u.port || u.username || u.password ||
-      !/^\/(?:explore|search_result)(?:\/[a-f0-9]{24})?\/?$|^\/user\/profile\/[a-f0-9]{24}(?:\/[a-f0-9]{24})?\/?$/.test(u.pathname))
+      !/^\/(?:explore|search_result)(?:\/[a-f0-9]{24})?\/?$|^\/search_result_ai\/?$|^\/user\/profile\/[a-f0-9]{24}(?:\/[a-f0-9]{24})?\/?$/.test(u.pathname))
     throw new Error('SCOPE_CHANGED');
   if (u.searchParams.has('error_code')) throw new Error('ACCESS_STOP');
+  if (/^\/search_result_ai\/?$/.test(u.pathname) &&
+      (u.searchParams.getAll('keyword').length!==1 || !u.searchParams.get('keyword')?.trim()))
+    throw new Error('SCOPE_CHANGED');
   return u.href;
 }
 
@@ -342,9 +345,12 @@ export function inspectDom(opts) {
       (u.pathname.startsWith('/website-login/') || /^\/login\/?$/.test(u.pathname) || u.searchParams.has('error_code')))
     return {error:'ACCESS_STOP'};
   if (u.origin !== 'https://www.xiaohongshu.com' ||
-      !/^\/(?:explore|search_result)(?:\/[a-f0-9]{24})?\/?$|^\/user\/profile\/[a-f0-9]{24}(?:\/[a-f0-9]{24})?\/?$/.test(u.pathname))
+      !/^\/(?:explore|search_result)(?:\/[a-f0-9]{24})?\/?$|^\/search_result_ai\/?$|^\/user\/profile\/[a-f0-9]{24}(?:\/[a-f0-9]{24})?\/?$/.test(u.pathname))
     return {error:'SCOPE_CHANGED'};
   if (u.searchParams.has('error_code')) return {error:'ACCESS_STOP'};
+  if (/^\/search_result_ai\/?$/.test(u.pathname) &&
+      (u.searchParams.getAll('keyword').length!==1 || !u.searchParams.get('keyword')?.trim()))
+    return {error:'SCOPE_CHANGED'};
   const visible = e => !!e?.getClientRects?.().length;
   const text = e => e?.innerText?.trim() || '';
   const me = [...document.querySelectorAll('a[href*="/user/profile/"]')]

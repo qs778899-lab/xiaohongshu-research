@@ -70,6 +70,20 @@ class ManualTabTests(unittest.TestCase):
         with self.mocks():return m.inspect(destination or self.p,'old',self.meta,self.user,
                                          parent_project=self.p if destination else None)
 
+    def test_ai_search_capture_remains_card_based_and_route_specific(self):
+        self.url='https://www.xiaohongshu.com/search_result_ai?keyword=Synthetic%2520query'
+        self.meta=self.put('meta-ai.json',{'tabId':11,'windowId':22,'url':self.url,'active':True})
+        self.capture['url']=self.url
+        result=self.run_inspect()
+        inspected=m.check_pointer(m.pointer(result['inspection']))
+        self.assertFalse(result['collection_permitted'])
+        self.assertEqual(m.proof_args(self.url),{'stage':'search','expectedPath':'/search_result_ai','query':'Synthetic%20query','backgroundText':True})
+        self.assertEqual(m.check_pointer(inspected['capture'])['cards'],self.capture['cards'])
+        with self.assertRaisesRegex(bridge.BridgeError,'MANUAL_SEARCH_CONTENT_REQUIRED'):
+            m.require_capture(dict(self.capture,cards=[],body='Generated summary'),inspected['binding'],m.proof_args(self.url))
+        with self.assertRaisesRegex(bridge.BridgeError,'MANUAL_CAPTURE_TARGET_CHANGED'):
+            m.require_capture(dict(self.capture,url=self.url.replace('search_result_ai','search_result')),inspected['binding'],m.proof_args(self.url))
+
     def test_diagnosis_needs_no_restoration_claim_and_consumes_no_attempt(self):
         before=self.stop.read_bytes()
         with self.mocks():result=m.diagnose_active(self.p,'old','Diagnose the verification interface only.')

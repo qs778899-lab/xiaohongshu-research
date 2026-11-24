@@ -72,6 +72,19 @@ class BridgeTests(unittest.TestCase):
             with self.assertRaises(b.BridgeError):b.safe_url(url)
         self.assertEqual(b.safe_url(URL),URL)
 
+    def test_ai_search_requires_exact_public_route_and_one_keyword(self):
+        url='https://www.xiaohongshu.com/search_result_ai?keyword=Synthetic%2520query'
+        self.assertEqual(b.safe_url(url),url)
+        for tail in ['', '?keyword=', '?keyword=%20', '?keyword=A&keyword=B', '/extra?keyword=A']:
+            with self.assertRaises(b.BridgeError):b.safe_url('https://www.xiaohongshu.com/search_result_ai'+tail)
+        with self.assertRaisesRegex(b.BridgeError,'ACCESS_STOP'):
+            b.safe_url(url+'&error_code=300017')
+        self.binding['tabs']['detail']['last_url']=URL
+        driver=Fake(url)
+        with self.assertRaisesRegex(b.BridgeError,'UNEXPECTED_TARGET_CHANGE'):
+            b.verify_tab(driver,self.binding,'detail')
+        self.assertEqual([x[0] for x in driver.calls],['metadata'])
+
     def test_observed_author_note_route_preserves_note_identity(self):
         author_url='https://www.xiaohongshu.com/user/profile/'+'4'*24+'/'+NOTE+'?xsec_token=observed'
         self.assertEqual(b.safe_url(author_url),author_url)

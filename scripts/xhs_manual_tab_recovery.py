@@ -62,7 +62,7 @@ def proof_args(url):
     if note_id(url):
         return {'stage':'body','expectedPath':'/explore/'+note_id(url),'backgroundText':True}
     query=parse_qs(parsed.query).get('keyword',[])
-    nr.require(parsed.path.rstrip('/')=='/search_result' and len(query)==1,'MANUAL_NOTE_OR_SEARCH_REQUIRED')
+    nr.require(parsed.path.rstrip('/') in {'/search_result','/search_result_ai'} and len(query)==1,'MANUAL_NOTE_OR_SEARCH_REQUIRED')
     return {'stage':'search','expectedPath':parsed.path.rstrip('/'),'query':query[0],'backgroundText':True}
 
 def require_capture(data,b,args):

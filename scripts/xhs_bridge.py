@@ -110,7 +110,10 @@ def safe_url(url):
         valid = p.scheme == 'https' and p.hostname == 'www.xiaohongshu.com' and not p.port and not p.username and not p.password
         if valid and (p.path.startswith('/website-login/') or p.path.rstrip('/')=='/login' or 'error_code' in parse_qs(p.query)):
             raise BridgeError('ACCESS_STOP')
-        valid = valid and re.fullmatch(r'/(?:explore|search_result)(?:/[a-f0-9]{24})?/?|/user/profile/[a-f0-9]{24}(?:/[a-f0-9]{24})?/?', p.path)
+        valid = valid and re.fullmatch(r'/(?:explore|search_result)(?:/[a-f0-9]{24})?/?|/search_result_ai/?|/user/profile/[a-f0-9]{24}(?:/[a-f0-9]{24})?/?', p.path)
+        if valid and p.path.rstrip('/') == '/search_result_ai':
+            keywords = parse_qs(p.query, keep_blank_values=True).get('keyword', [])
+            valid = len(keywords) == 1 and bool(keywords[0].strip())
     except (ValueError, TypeError):
         valid = False
     if not valid: raise BridgeError('SCOPE_CHANGED')
