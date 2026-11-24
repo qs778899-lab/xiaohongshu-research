@@ -25,6 +25,24 @@ export function publicUrl(value) {
   return u.href;
 }
 
+// Diagnostics must be able to identify the verification page that collection
+// correctly rejects. This is metadata only, never a navigation allowlist.
+export function diagnosticTabMetadata(t) {
+  const u=new URL(t.url);
+  if(u.protocol!=='https:' || u.hostname!=='www.xiaohongshu.com' || u.port || u.username || u.password)
+    throw new Error('SCOPE_CHANGED');
+  if(!Number.isInteger(t.id)||!Number.isInteger(t.windowId)||t.active!==true)
+    throw new Error('MANUAL_NATIVE_IDS_REQUIRED');
+  let pageKind;
+  if(u.pathname==='/website-login/captcha')pageKind='verification_page';
+  else if(u.pathname.startsWith('/website-login/') || /^\/login\/?$/.test(u.pathname))pageKind='login_or_verification_page';
+  else if(u.pathname==='/404' || u.searchParams.has('error_code'))pageKind='access_error_page';
+  else {publicUrl(t.url);pageKind='public_page_metadata_only';}
+  return {tabId:t.id,windowId:t.windowId,url:t.url,active:true,pageKind,
+    readOnly:true,pageContentRead:false,identityVerified:false,
+    visibleChallenge:'not_checked',verificationCompleted:false,collectionPermitted:false};
+}
+
 export function requirePinnedProfile(status, contextId, extensionVersion) {
   if (!status) throw new Error('CONNECTOR_OFFLINE');
   if (status.daemonVersion !== '2.0.2') throw new Error('DAEMON_CHANGED_RECHECK_REQUIRED');
@@ -1061,7 +1079,7 @@ export function carouselDom(opts) {
 }
 
 async function main(cfg) {
-  if (cfg.action==='active_user_tab') {
+  if (['active_user_tab','diagnose_active_user_tab'].includes(cfg.action)) {
     const pkg=path.resolve(cfg.packageRoot);
     const load=p=>import(pathToFileURL(path.join(pkg,'dist/src',p)).href);
     const {requestDaemon}=await load('browser/daemon-transport.js');
@@ -1070,7 +1088,9 @@ async function main(cfg) {
     const rows=await sendCommand('chrome-call',{contextId:cfg.contextId,chromeMethod:'tabs.query',
       chromeArgs:[{active:true,lastFocusedWindow:true,url:'https://www.xiaohongshu.com/*'}]});
     if(!Array.isArray(rows)||rows.length!==1)throw new Error('MANUAL_UNIQUE_ACTIVE_TAB_REQUIRED');
-    const t=rows[0];publicUrl(t.url);
+    const t=rows[0];
+    if(cfg.action==='diagnose_active_user_tab')return diagnosticTabMetadata(t);
+    publicUrl(t.url);
     if(!Number.isInteger(t.id)||!Number.isInteger(t.windowId)||t.active!==true)throw new Error('MANUAL_NATIVE_IDS_REQUIRED');
     return {tabId:t.id,windowId:t.windowId,url:t.url,active:true,readOnly:true,pageContentRead:false};
   }

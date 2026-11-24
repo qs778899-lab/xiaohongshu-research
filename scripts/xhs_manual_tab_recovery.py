@@ -254,6 +254,39 @@ def finish_inspection(attempt_file, verify_focus=False):
             raise
         finally:driver.close()
 
+def diagnose_active(project,parent_name,authorization):
+    """Metadata-only diagnosis while stopped; no restoration claim or attempt consumed."""
+    project=Path(project).resolve();xp.legacy.research_path(project)
+    nr.require(isinstance(authorization,str) and authorization.strip(),'DIAGNOSTIC_AUTHORIZATION_REQUIRED')
+    parent=bridge.load_binding(project,parent_name)
+    result={'kind':'manual_tab_diagnostic_v1','at':xp.legacy.now(),
+            'authorization':authorization,'collection_permitted':False,'send_permitted':False,
+            'restoration_attempt_consumed':False,'verification_completed':False,
+            'scope':'original_profile_active_xhs_tab_metadata_only'}
+    with nr.locked_stops(parent['profile_guard_key'],parent['account_uid']) as keys:
+        stops=nr.current_stops(keys);driver=None
+        try:
+            driver=bridge.Driver(parent['runtime'])
+            result['metadata']=driver.call('diagnose_active_user_tab',parent)
+            result['status']='observed'
+            result['next_action']='inspect_visible_verification_ui_without_navigation_or_collection'
+        except bridge.BridgeError as exc:
+            result.update(status='blocked',error=exc.code)
+            result['next_action']={
+                'CONNECTOR_PERMISSION_DENIED':'execution_permission_review_not_browser_restart',
+                'MANUAL_UNIQUE_ACTIVE_TAB_REQUIRED':'locate_original_profile_window',
+                'SPECIFIED_PROFILE_OFFLINE':'check_original_profile_connection',
+                'CONNECTOR_OFFLINE':'check_local_connector',
+            }.get(exc.code,'retain_stop_and_diagnose_error')
+        finally:
+            if driver is not None:driver.close()
+        nr.require(nr.current_stops(keys)==stops,'MANUAL_STOP_CHANGED')
+        nr.require(bridge.load_binding(project,parent_name)==parent,'MANUAL_PARENT_CHANGED')
+        result.update(stops=stops,stop_unchanged=True,original_binding_unchanged=True)
+    folder=project/'bridge/manual-tab-diagnostics';folder.mkdir(parents=True,exist_ok=True)
+    ref=evidence(folder/(xp.digest(result)+'.json'),result)
+    return dict(result,evidence=ref)
+
 def inspect_active(project,parent_name,user_file,parent_project=None):
     """Observe only the active XHS tab in the original profile's focused window."""
     project=Path(project).resolve();xp.legacy.research_path(project)
@@ -815,6 +848,8 @@ def web_exceptions(project,b,keys):
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     sub=p.add_subparsers(dest='command',required=True)
+    s=sub.add_parser('diagnose-active');s.add_argument('--project',type=Path,required=True)
+    s.add_argument('--binding',required=True);s.add_argument('--authorization',required=True)
     s=sub.add_parser('inspect');s.add_argument('--project',type=Path,required=True);s.add_argument('--binding',required=True)
     s.add_argument('--metadata',type=Path,required=True);s.add_argument('--user',type=Path,required=True)
     s.add_argument('--parent-project',type=Path)
@@ -830,7 +865,8 @@ def main():
     s=sub.add_parser('attest');s.add_argument('--probe',type=Path,required=True);s.add_argument('--review',type=Path,required=True);s.add_argument('--binding',required=True)
     s=sub.add_parser('recheck');s.add_argument('--project',type=Path,required=True);s.add_argument('--binding',required=True)
     a=p.parse_args()
-    if a.command=='inspect':result=inspect(a.project,a.binding,a.metadata,a.user,a.parent_project)
+    if a.command=='diagnose-active':result=diagnose_active(a.project,a.binding,a.authorization)
+    elif a.command=='inspect':result=inspect(a.project,a.binding,a.metadata,a.user,a.parent_project)
     elif a.command=='inspect-active':result=inspect_active(a.project,a.binding,a.user,a.parent_project)
     elif a.command=='finish-inspection':result=finish_inspection(a.attempt,a.verify_focus)
     elif a.command=='probe-search':result=probe_search(a.inspection,a.task)

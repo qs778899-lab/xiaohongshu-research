@@ -104,6 +104,7 @@ scripts/test_inline_emoji.py
 scripts/test_layout_activation.py
 scripts/test_manual_media_visibility.py
 scripts/test_manual_tab_recovery.py
+scripts/test_verification_diagnostic.mjs
 scripts/test_media.py
 scripts/test_native.py
 scripts/test_native_recovery.py

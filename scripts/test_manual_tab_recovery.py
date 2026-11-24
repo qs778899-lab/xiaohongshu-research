@@ -41,6 +41,10 @@ class ManualTabTests(unittest.TestCase):
             def close(self):pass
             def call(self,action,b=None,role=None,**kw):
                 case.calls.append(action)
+                if action=='diagnose_active_user_tab':
+                    if case.error:raise bridge.BridgeError(case.error)
+                    return {'tabId':11,'windowId':22,'url':case.url,'active':True,
+                            'pageKind':'public_page_metadata_only','pageContentRead':False}
                 if action=='active_user_tab':return {'tabId':11,'windowId':22,'url':case.url,'active':True}
                 if action=='adopt_user_tab' and case.adopt_error:raise bridge.BridgeError(case.adopt_error)
                 if action=='adopt_user_tab':return {'page':'A'*32,'url':case.url,'owned':False}
@@ -65,6 +69,40 @@ class ManualTabTests(unittest.TestCase):
     def run_inspect(self,destination=None):
         with self.mocks():return m.inspect(destination or self.p,'old',self.meta,self.user,
                                          parent_project=self.p if destination else None)
+
+    def test_diagnosis_needs_no_restoration_claim_and_consumes_no_attempt(self):
+        before=self.stop.read_bytes()
+        with self.mocks():result=m.diagnose_active(self.p,'old','Diagnose the verification interface only.')
+        self.assertEqual(self.calls,['diagnose_active_user_tab'])
+        self.assertFalse(result['collection_permitted']);self.assertFalse(result['send_permitted'])
+        self.assertFalse(result['verification_completed']);self.assertFalse(result['restoration_attempt_consumed'])
+        self.assertEqual(self.stop.read_bytes(),before)
+        self.assertFalse((self.p/'bridge/manual-tab-recoveries').exists())
+        self.assertFalse((self.p/'account-guard/manual-tab-attempts').exists())
+        self.assertEqual(m.check_pointer(result['evidence'])['status'],'observed')
+
+    def test_diagnosis_distinguishes_execution_permission_from_browser_disconnect(self):
+        self.error='CONNECTOR_PERMISSION_DENIED'
+        with self.mocks():result=m.diagnose_active(self.p,'old','Diagnose only.')
+        self.assertEqual(result['next_action'],'execution_permission_review_not_browser_restart')
+        self.assertEqual(self.calls,['diagnose_active_user_tab'])
+        self.assertFalse(result['restoration_attempt_consumed'])
+
+    def test_diagnosis_requires_authorization_before_driver(self):
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'AUTHORIZATION_REQUIRED'):
+            m.diagnose_active(self.p,'old','')
+        self.assertEqual(self.calls,[])
+
+    def test_diagnosis_rejects_concurrent_stop_change(self):
+        with self.mocks(),patch.object(m.nr,'current_stops',side_effect=[self.stops,{}]),\
+             self.assertRaisesRegex(bridge.BridgeError,'STOP_CHANGED'):
+            m.diagnose_active(self.p,'old','Diagnose only.')
+        self.assertFalse((self.p/'bridge/manual-tab-diagnostics').exists())
+
+    def test_diagnosis_rejects_repository_destination_before_driver(self):
+        with self.mocks(),self.assertRaises(Exception):
+            m.diagnose_active(Path(m.__file__).resolve().parent.parent,'old','Diagnose only.')
+        self.assertEqual(self.calls,[])
 
     def failed_focus_fixture(self):
         self.adopt_error='USER_TAB_NOT_FOCUSED'
