@@ -196,3 +196,6 @@ scripts/xhs_expired_link_return.py
 scripts/test_expired_link_return.py
 scripts/test_note_pre_navigation_resume.py
 scripts/test_manual_binding_fork.py
+references/public-reply-verification.md
+scripts/test_public_reply_check.py
+scripts/xhs_public_reply_check.py
