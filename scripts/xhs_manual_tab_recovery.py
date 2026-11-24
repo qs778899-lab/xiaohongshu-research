@@ -78,7 +78,8 @@ def require_capture(data,b,args):
         nr.require(not any(data.get(k) for k in ('loginWall','securityBlock','notFound','loading')),
                    'MANUAL_CAPTURE_FAILED')
         title,body=data.get('title'),data.get('body')
-        nr.require(isinstance(title,str) and isinstance(body,str) and bool(body.strip()),
+        nr.require(isinstance(title,str) and isinstance(body,str)
+                   and (bool(body.strip()) or image_only_capture(data)),
                    'MANUAL_NOTE_CONTENT_REQUIRED')
         nr.require(bool(data.get('authors')),'MANUAL_NOTE_AUTHOR_REQUIRED')
         if not title.strip():
@@ -88,6 +89,25 @@ def require_capture(data,b,args):
                        and body.strip() not in {'[图片]','[图片评论]','加载中','加载中...','加载中…','正在加载...', 'Loading...','Loading…'}
                        and isinstance(authors,list)
                        and any(valid_public_author(a) for a in authors),'MANUAL_NOTE_AUTHOR_REQUIRED')
+
+def image_only_capture(data):
+    # Title, author and actual note-media metadata establish a rendered note,
+    # not a visual review. Emoji assets and loading shells cannot qualify.
+    title=data.get('title');body=data.get('body');authors=data.get('authors');media=data.get('media')
+    if not (data.get('stage')=='body' and isinstance(title,str) and title.strip()
+            and title.strip() not in {'[图片]','[图片评论]','加载中','加载中...','加载中…','正在加载...','Loading...','Loading…'}
+            and isinstance(body,str) and not body.strip() and isinstance(authors,list)
+            and any(valid_public_author(a) for a in authors) and isinstance(media,list)):
+        return False
+    for item in media:
+        if not isinstance(item,dict) or item.get('tag')!='IMG':continue
+        try:parsed=urlparse(item.get('url',''))
+        except (ValueError,TypeError):continue
+        if (parsed.scheme=='https' and parsed.hostname and parsed.hostname.endswith('.xhscdn.com')
+                and not parsed.username and not parsed.password and not parsed.port and parsed.path not in {'','/'}):
+            return True
+    return False
+
 
 def valid_public_author(author):
     if not isinstance(author,dict) or not isinstance(author.get('name'),str) or not author['name'].strip():
@@ -629,18 +649,20 @@ def validate_verified_search(inspected):
     require_capture(check_pointer(inspected['capture']),initial['binding'],args)
 
 def finish_note(inspection_file):
-    """Validate saved normal content after a local URL or empty-title rejection."""
+    """Validate saved normal content after a local URL or content-shape rejection."""
     inspected,_=nr.read_json(inspection_file);root=Path(inspection_file).parent
     attempt=check_pointer(inspected['attempt']);b=inspected['binding']
     failure,_=nr.read_json(root/'note-failure.json');started,_=nr.read_json(root/'note-attempt.json')
     meta,_=nr.read_json(root/'note-metadata-0.json');capture,_=nr.read_json(root/'note-capture-0.json')
     titleless=(failure.get('error')=='MANUAL_NOTE_CONTENT_REQUIRED'
                and isinstance(capture.get('title'),str) and not capture['title'].strip())
-    nr.require(failure.get('error')=='MANUAL_CAPTURE_TARGET_CHANGED' or titleless,
+    image_only=(failure.get('error')=='MANUAL_NOTE_CONTENT_REQUIRED' and image_only_capture(capture))
+    content_shape=titleless or image_only
+    nr.require(failure.get('error')=='MANUAL_CAPTURE_TARGET_CHANGED' or content_shape,
                'MANUAL_SAVED_NOTE_NOT_APPLICABLE')
     nr.require(not (root/'note-probe.json').exists(),'MANUAL_NOTE_ALREADY_FINISHED')
     history=None
-    if titleless:
+    if content_shape:
         before,_=nr.read_json(root/'note-before.json');navigation,_=nr.read_json(root/'note-navigation.json')
         search=check_pointer(inspected['capture']);parent=check_pointer(attempt['parent'])
         nr.require(proof_args(search['url'])['stage']=='search','MANUAL_ACTUAL_SEARCH_REQUIRED')
@@ -663,7 +685,7 @@ def finish_note(inspection_file):
         history={name:pointer(root/name) for name in ('note-failure.json','note-attempt.json',
                  'note-before.json','note-navigation.json','note-metadata-0.json','note-capture-0.json')}
     nr.require(meta.get('page')==b['tabs']['detail']['page'],'MANUAL_PAGE_CHANGED')
-    if titleless:
+    if content_shape:
         nr.require(capture.get('page',meta['page'])==meta['page']
                    and all(v.get('windowId') in (None,b['tabs']['detail']['window_id']) for v in (before,meta)),
                    'MANUAL_PAGE_CHANGED')
@@ -678,7 +700,7 @@ def finish_note(inspection_file):
                 'capture':pointer(root/'note-capture-0.json'),'excluded_note_id':note_id(original) if original else None,
                 'collection_permitted':False,'stops_unchanged':True,
                 'local_validation_of_existing_capture':True,'preserved_failure':pointer(root/'note-failure.json')}
-        if history:result['saved_titleless_note_history']=history
+        if history:result['saved_image_only_note_history' if image_only else 'saved_titleless_note_history']=history
         evidence(root/'note-probe.json',result)
         return {'probe':str(root/'note-probe.json'),'capture':result['capture'],'collection_permitted':False}
 
@@ -703,9 +725,9 @@ def validated_probe(probe_ref):
         original_note=check_pointer(probe['pre_navigation_history']['note-attempt.json'])
         nr.require(note_id(check_pointer(probe['capture'])['url'])==original_note['note_id'],
                    'MANUAL_ORIGINAL_NOTE_REQUIRED')
-    if probe.get('saved_titleless_note_history'):
+    if probe.get('saved_titleless_note_history') or probe.get('saved_image_only_note_history'):
         root=Path(probe['inspection']['file']).parent
-        history=probe['saved_titleless_note_history']
+        history=probe.get('saved_titleless_note_history') or probe['saved_image_only_note_history']
         nr.require(set(history)=={'note-failure.json','note-attempt.json','note-before.json',
                    'note-navigation.json','note-metadata-0.json','note-capture-0.json'},'MANUAL_NOTE_HISTORY_CHANGED')
         for name,ref in history.items():

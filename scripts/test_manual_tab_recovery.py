@@ -518,6 +518,41 @@ class ManualTabTests(unittest.TestCase):
         with self.mocks():granted=m.attest(result['probe'],review,'titleless')
         self.assertEqual(granted['state'],'ready');self.assertTrue(granted['stops_unchanged'])
 
+    def saved_image_only_fixture(self):
+        inspection=self.saved_titleless_fixture();root=inspection.parent
+        capture=json.loads((root/'note-capture-0.json').read_text())
+        capture.update(title='Synthetic image question',body='',stage='body',
+                       media=[{'tag':'IMG','url':'https://sns-webpic-qc.xhscdn.com/synthetic-note.webp'}])
+        self.put(str(root/'note-capture-0.json'),capture)
+        return inspection
+
+    def test_image_only_first_capture_finishes_without_reading_pixels_or_navigating(self):
+        inspection=self.saved_image_only_fixture();root=inspection.parent
+        before={p.name:p.read_bytes() for p in root.glob('*.json')}
+        with self.mocks(),patch.object(bridge,'Driver',side_effect=AssertionError('No browser')):
+            result=m.finish_note(inspection)
+        self.assertFalse(result['collection_permitted'])
+        probe=m.check_pointer(m.pointer(result['probe']))
+        self.assertIn('saved_image_only_note_history',probe)
+        for name,data in before.items():self.assertEqual((root/name).read_bytes(),data)
+        m.require_capture(m.check_pointer(probe['capture']),probe['binding'],m.proof_args(m.check_pointer(probe['capture'])['url']))
+        review=self.put('image-note-review.json',{'reader':'codex','reviewed':True,'body_read':True,
+            'capture_sha256':probe['capture']['sha256'],'summary':'Read title and author; body is explicitly empty. Image remains unread.',
+            'positions':['/title','/body','/authors'],'comments_read':False,'media_read':False})
+        with self.mocks():grant=m.attest(result['probe'],review,'image-note')
+        self.assertEqual(grant['scope'],'rendered_public_web_only')
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'ALREADY_FINISHED'):m.finish_note(inspection)
+
+    def test_image_only_capture_rejects_empty_placeholder_author_emoji_and_access_states(self):
+        inspection=self.saved_image_only_fixture();root=inspection.parent
+        capture=json.loads((root/'note-capture-0.json').read_text());b=json.loads(inspection.read_text())['binding'];args=m.proof_args(capture['url'])
+        variants=[dict(capture,title=''),dict(capture,title='加载中'),dict(capture,body=None),dict(capture,authors=[]),
+            dict(capture,media=[]),dict(capture,media=[{'tag':'IMG','url':'https://picasso-static.xiaohongshu.com/emoji.png'}]),
+            dict(capture,media=[{'tag':'IMG','url':'https://xhscdn.com.evil/synthetic.webp'}]),dict(capture,loading=True),
+            dict(capture,securityBlock=True),dict(capture,loginWall=True),dict(capture,notFound=True)]
+        for value in variants:
+            with self.subTest(value=value),self.assertRaises(bridge.BridgeError):m.require_capture(value,b,args)
+
     def test_titleless_capture_requires_observed_title_body_author_and_normal_state(self):
         inspection=self.saved_titleless_fixture();b=json.loads(inspection.read_text())['binding']
         capture=json.loads((inspection.parent/'note-capture-0.json').read_text());args=m.proof_args(capture['url'])
