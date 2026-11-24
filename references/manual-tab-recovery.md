@@ -90,6 +90,8 @@ CDP 元数据有时不返回 Chrome 窗口编号，不能用空值覆盖先前�
 
 返回后捕获原范围，绑定仍为 blocked。Codex 实际读完正文及作者，或作者页的卡片标题后，执行 `xhs_manual_home_return.py --project P --binding B attest --probe PROBE --review REVIEW`；再核对当前原页后仅恢复原绑定 ready，不签发新凭据、不完成研究任务、不解除 STOP。未知结果不重放导航；新的访问限制更新共享 STOP 并使旧凭据失效。此入口不改变 404 恢复语义或原凭据代码指纹。
 
+新建的 manual 网页凭据在首个采集单元前可能没有 `verified_at`；该运行时间戳不是原页验证证明。此时仍由完整的原搜索、正常正文、实际审读及 grant 链核对精确标签、同账号与冻结 STOP 后单次返回。缺少或变更原凭据仍拒绝，不能补造时间戳、改绑定或重复导航来续跑。
+
 ## 自主建立新专项标签
 
 已有持续开页授权且原项目网页绑定仍有效时，可运行 `xhs_project_tab.py --project NEW --parent-project OLD --binding ORIGINAL --authorization "实际授权依据"`。它在原配置与精确登记窗口中创建一个固定小红书首页，保留旧标签；先复核原账号及全部 STOP，再对新页执行首页 inspect。随后仍运行 `probe-search / probe-note / attest`，实际读完新搜索和正文才建立新项目绑定。

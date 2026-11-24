@@ -88,9 +88,13 @@ def context(project,name):
                'HOME_RETURN_TARGET_CHANGE_REQUIRED')
     nr.require(b.get('manual_tab_revalidation') and b.get('manual_single_tab') is True
                and b.get('transport_surface')=='browser' and slot.get('owned') is False
-               and slot.get('page') and slot.get('session') and slot.get('verified_at')
+               and slot.get('page') and slot.get('session')
                and type(slot.get('chrome_tab_id')) is int and type(slot.get('window_id')) is int,
                'HOME_RETURN_VERIFIED_MANUAL_TAB_REQUIRED')
+    # A fresh manual grant proves its exact tab through the reviewed probe.
+    # verified_at is only added by later collection; requiring it deadlocks a
+    # return before the first unit. lease() and restore_source() below still
+    # validate the original grant, frozen STOPs and observed normal source.
     nr.require(not slot.get('navigation_intent'),'HOME_RETURN_NO_INFLIGHT_NAVIGATION_REQUIRED')
     target=slot.get('last_url');note=target_key(target)
     nr.require(note and note not in b.get('manual_excluded_note_ids',[]),'HOME_RETURN_NORMAL_NOTE_REQUIRED')

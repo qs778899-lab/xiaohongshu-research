@@ -109,6 +109,25 @@ class HomeReturnTests(unittest.TestCase):
         self.assertTrue(self.task_before['payload']['bridge']['hashes']);self.restore()
         self.assertEqual(self.db.task(self.task),self.task_before)
 
+    def test_fresh_manual_grant_can_return_before_first_collection_timestamp(self):
+        b=bridge.load_binding(self.project,self.name)
+        b['tabs']['detail'].pop('verified_at',None)
+        b['tabs']['search'].pop('verified_at',None)
+        bridge.save_binding(self.project,self.name,b);self.before=copy.deepcopy(b)
+        grant=copy.deepcopy(b['manual_tab_revalidation'])
+        result=self.restore();outcome=self.attest(result)
+        self.assertEqual(self.driver.calls.count('navigate'),1)
+        self.assertEqual(bridge.load_binding(self.project,self.name)['manual_tab_revalidation'],grant)
+        self.assertFalse(outcome['new_grant']);self.assertEqual(self.db.task(self.task),self.task_before)
+        self.unchanged_stops()
+
+    def test_missing_timestamp_cannot_substitute_for_valid_grant(self):
+        b=bridge.load_binding(self.project,self.name);b['tabs']['detail'].pop('verified_at',None)
+        bridge.save_binding(self.project,self.name,b)
+        Path(b['manual_tab_revalidation']['file']).write_text('{}')
+        with self.assertRaises(xp.legacy.ResearchError):self.restore()
+        self.assertEqual(self.driver.calls,[]);self.unchanged_stops()
+
     def test_note_stages_share_the_same_pre_navigation_home_return(self):
         for stage in ['body','roots','replies','images','video']:
             with self.subTest(stage=stage):
