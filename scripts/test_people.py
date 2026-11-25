@@ -49,6 +49,25 @@ class PeopleTests(unittest.TestCase):
         self.assertEqual(len(b['manifest']['units']), 3 * len(queries))
         self.assertNotIn('示例机构 示例专业 示例甲 结束', queries)
 
+    def test_entity_contexts_replace_global_without_cross_routing(self):
+        other = deepcopy(self.cfg['entities'][0])
+        other.update(id='person-b', name='示例乙')
+        self.cfg['entities'].append(other)
+        self.cfg['entities'][0]['contexts'] = {'institutions': ['另一机构'], 'professions': ['另一专业']}
+        b = self.plan()
+        routed = {q['query']: q['entity_ids'] for q in b['queries']}
+        self.assertNotIn('示例甲 示例机构', routed)
+        self.assertIn('示例甲 另一机构', routed)
+        self.assertIn('示例乙 示例机构', routed)
+        self.assertEqual(routed['另一机构 结束'], ['person-a'])
+        self.assertEqual(routed['示例机构 结束'], ['person-b'])
+
+    def test_invalid_entity_contexts_rejected(self):
+        for value in [None, [], {'institutions': ['sample']}]:
+            self.cfg['entities'][0]['contexts'] = value
+            with self.assertRaises(ValueError):
+                self.plan()
+
     def test_shared_queries_union_people_without_duplicate_execution(self):
         other = deepcopy(self.cfg['entities'][0]); other.update(id='person-b', name='示例乙', pinyin=['shi', 'li', 'yi'])
         self.cfg['entities'].append(other)

@@ -32,3 +32,7 @@ python scripts/xhs_people.py coverage --config /external/research/people.json --
 5. 按[多医生覆盖轮换](medical-experience.md)优先补评价不足的人物。先处理已纳入帖的未读下游，避免用无限扩词掩盖积压。
 
 合成测试验证匹配、路由及续跑不变量；真实搜索、排序、回复、媒体仍需独立验证。可核验的交付是明确入口及下游的处理状态和缺口，不能承诺全站零遗漏。
+
+## 逐人机构上下文
+
+`entities` 中可选的 `contexts` 对象提供 `institutions` 和 `professions` 两个列表。提供时完整替代该人物的全局上下文；省略时沿用原全局行为。只影响查询发现路由，不证明任职或评价归属。历史时期及来源仍由外部课题配置保存，不因配置改变重建旧任务或清除故障。

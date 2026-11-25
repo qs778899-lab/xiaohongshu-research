@@ -63,6 +63,11 @@ def validate(cfg):
                 raise ValueError('Nonempty ' + f + ' required when supplied')
         if 'surname_pinyin' in e and (not e.get('surname') or not re.fullmatch('[a-z]+', e['surname_pinyin'])):
             raise ValueError('Surname pinyin needs explicit surname and lowercase spelling')
+        if 'contexts' in e:
+            if not isinstance(e['contexts'], dict):
+                raise ValueError('Entity contexts must be an object')
+            for field in ('institutions', 'professions'):
+                strings(e['contexts'].get(field), field)
         aliases = e.get('aliases', [])
         if not isinstance(aliases, list):
             raise ValueError('Aliases must be a list')
@@ -154,6 +159,8 @@ def plan(cfg, config_path, project=None):
         if origin not in t['origins']: t['origins'].append(origin)
 
     for e in cfg['entities']:
+        contexts = e.get('contexts', cfg['contexts'])
+        context_words = contexts['institutions'] + contexts['professions']
         eid, name = e['id'], e['name']
         term(name, 'literal', 'full_name', eid, 'provided_name')
         query(name, 'full_name', eid)
