@@ -61,6 +61,52 @@ class BackgroundTextTests(unittest.TestCase):
             b.prepare_target(self.project,self.binding,driver,self.body)
         self.assertIn('activate',[x[0] for x in driver.calls])
 
+    def test_hidden_user_tab_keeps_local_visibility_gap_without_selection(self):
+        self.binding['tabs']['detail']['owned']=False
+        for stage in ['body','images']:
+            self.body['payload']['stage']=stage
+            driver=VisibilityFake()
+            with self.assertRaisesRegex(b.BridgeError,'^TARGET_NOT_VISIBLE$'):
+                b.prepare_target(self.project,self.binding,driver,self.body)
+            self.assertNotIn('activate',[x[0] for x in driver.calls])
+
+    def test_owned_listing_is_selected_before_navigation_and_on_return(self):
+        class Listing(VisibilityFake):
+            def call(self,action,binding=None,role=None,**fields):
+                if action=='activate':
+                    self.calls.append((action,binding['context_id'],role,fields));self.visible=True
+                    return {'activated':binding['tabs'][role]['page'],'windowFocusRequested':False}
+                return super().call(action,binding,role,**fields)
+        self.binding['tabs']['search']=dict(self.binding['tabs']['detail'])
+        task={'payload':{'stage':'search','target':'Synthetic query'}}
+        url='https://www.xiaohongshu.com/search_result/?keyword=Synthetic%20query'
+        driver=Listing()
+        with patch.object(b,'observed_url',return_value=url),patch.object(b,'save_binding'),patch.object(b.time,'sleep'):
+            for _ in range(2):
+                driver.visible=False;driver.calls=[]
+                _,_,args=b.prepare_target(self.project,self.binding,driver,task,text_only=True)
+                actions=[x[0] for x in driver.calls]
+                self.assertEqual(actions.count('activate'),1)
+                if 'navigate' in actions:self.assertLess(actions.index('activate'),actions.index('navigate'))
+                self.assertTrue(args['backgroundText'])
+        self.binding['tabs']['search']['owned']=False;driver.visible=False;driver.calls=[]
+        with patch.object(b,'observed_url',return_value=url):
+            b.prepare_target(self.project,self.binding,driver,task,text_only=True)
+        self.assertNotIn('activate',[x[0] for x in driver.calls])
+
+    def test_loading_hidden_user_tab_does_not_activate_or_reload(self):
+        self.binding['tabs']['detail']['owned']=False
+        driver=VisibilityFake()
+        original=driver.call
+        def call(action,*args,**kwargs):
+            if action=='capture':raise b.BridgeError('CONTENT_LOADING')
+            return original(action,*args,**kwargs)
+        driver.call=call
+        with patch.object(b.time,'sleep'):
+            with self.assertRaisesRegex(b.BridgeError,'^TARGET_NOT_VISIBLE$'):
+                b.ready_capture(self.project,self.binding,driver,'detail',{'stage':'body'})
+        self.assertFalse(any(x[0] in {'activate','reload'} for x in driver.calls))
+
     def test_wrong_account_still_rejected_before_capture(self):
         driver=VisibilityFake(uid='9'*24)
         with self.assertRaisesRegex(b.BridgeError,'ACCOUNT_MISMATCH'):
@@ -120,6 +166,7 @@ class BackgroundTextTests(unittest.TestCase):
         self.assertNotIn('activate',[x[0] for x in driver.calls])
 
     def test_pagination_recovery_does_not_reintroduce_activation_in_background(self):
+        self.binding['tabs']['search']=dict(self.binding['tabs']['detail'])
         for background in [True,False]:
             driver=Mock();task={'id':'search-task','payload':{'stage':'search','target':'synthetic query',
                 'sort':'general','bridge':{'fault':{'recovery':{}},'cursor':{'scrollTop':15}}}}

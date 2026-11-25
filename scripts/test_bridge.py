@@ -67,6 +67,18 @@ class BridgeTests(unittest.TestCase):
 
     def tearDown(self):self.project.close();self.patch.stop();self.tmp.cleanup()
 
+    def test_empty_initial_owned_home_is_loading_but_never_identity_proof(self):
+        self.binding['tabs']['detail'].update(state='created',last_url='https://www.xiaohongshu.com/explore')
+        driver=Fake('')
+        with self.assertRaisesRegex(b.BridgeError,'^CONTENT_LOADING$'):
+            b.verify_tab(driver,self.binding,'detail')
+        self.assertEqual([x[0] for x in driver.calls],['metadata'])
+        for change in [{'owned':False},{'verified_at':'already verified'},{'navigation_intent':{'url':URL}}]:
+            slot=dict(self.binding['tabs']['detail']);self.binding['tabs']['detail'].update(change)
+            with self.assertRaisesRegex(b.BridgeError,'^SCOPE_CHANGED$'):
+                b.verify_tab(Fake(''),self.binding,'detail')
+            self.binding['tabs']['detail']=slot
+
     def test_scope_private_and_tricky_hosts_rejected(self):
         for url in ['https://www.xiaohongshu.com/chat','https://www.xiaohongshu.com.evil/explore','https://www.xiaohongshu.com@evil/explore','http://www.xiaohongshu.com/explore','https://www.xiaohongshu.com:444/explore']:
             with self.assertRaises(b.BridgeError):b.safe_url(url)

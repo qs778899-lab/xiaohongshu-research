@@ -30,7 +30,12 @@ def prepare_media_target(project, binding, driver, task):
                     # Do not submit an unsupported selection or attempt a fallback.
                     raise bridge.BridgeError('MEDIA_ACTIVATION_UNCONFIRMED')
                 return driver.call(action, *args, **kwargs)
-        return bridge.prepare_target(project, binding, NoUserTabActivation(), task)
+        try:
+            return bridge.prepare_target(project, binding, NoUserTabActivation(), task)
+        except bridge.BridgeError as exc:
+            if exc.code in {'TARGET_NOT_VISIBLE','TARGET_VISIBILITY_UNCONFIRMED'}:
+                raise bridge.BridgeError('MEDIA_ACTIVATION_UNCONFIRMED') from None
+            raise
     return bridge.prepare_target(project, binding, driver, task)
 
 

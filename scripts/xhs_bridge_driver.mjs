@@ -171,6 +171,12 @@ export function selectResults() {
 }
 
 // Read-only geometry for diagnosing a selected element versus viewport mismatch.
+export function scrollDiagnosticGuardArgs(args) {
+  // Diagnostics must be able to observe a collapsed grid. They still enforce
+  // account, URL, query and access guards and cannot produce collection proof.
+  return {...args,backgroundText:false,guardOnly:true};
+}
+
 export function scrollDiagnoseDom({includeListingText=true}={}) {
   const box=e=>{
     if(!e)return null;
@@ -1278,7 +1284,7 @@ async function main(cfg) {
     }
     if (cfg.action==='scroll_diagnose') {
       requireScrollDiagnosticTarget(cfg);
-      return await evaluateOnce(`(()=>{const c=(${domSource(inspectDom)})(${JSON.stringify({...args,guardOnly:true})});if(c.error)return c;return {url:c.url,uid:c.uid,...(${domSource(scrollDiagnoseDom)})(${JSON.stringify({includeListingText:cfg.stage==='search'})})}})()`);
+      return await evaluateOnce(`(()=>{const c=(${domSource(inspectDom)})(${JSON.stringify(scrollDiagnosticGuardArgs(args))});if(c.error)return c;return {url:c.url,uid:c.uid,...(${domSource(scrollDiagnoseDom)})(${JSON.stringify({includeListingText:cfg.stage==='search'})})}})()`);
     }
     if (cfg.action==='capture') return await evaluateOnce(`(${domSource(inspectDom)})(${JSON.stringify(args)})`);
     if (cfg.action==='advance') {

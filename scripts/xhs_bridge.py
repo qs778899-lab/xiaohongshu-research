@@ -589,7 +589,7 @@ def provision_role(project,name,b,driver,role):
                 # transition. Check this exact ID without reading page content.
                 meta=driver.call('metadata',b,role)
                 if meta.get('page')!=slot['page'] or meta.get('url') not in {
-                    'about:blank','https://www.xiaohongshu.com','https://www.xiaohongshu.com/',
+                    '','about:blank','https://www.xiaohongshu.com','https://www.xiaohongshu.com/',
                     'https://www.xiaohongshu.com/explore'}:raise
             time.sleep(1)
 
@@ -603,7 +603,7 @@ def verify_tab(driver,b,role):
     meta=driver.call('metadata',b,role)
     if meta['page'] != b['tabs'][role]['page']: raise BridgeError('TARGET_MISMATCH')
     slot=b['tabs'][role]
-    if meta['url'] in {'about:blank','https://www.xiaohongshu.com/','https://www.xiaohongshu.com'} and slot.get('owned') and slot.get('state')=='created' and slot.get('last_url')=='https://www.xiaohongshu.com/explore' and not slot.get('verified_at'):
+    if meta['url'] in {'','about:blank','https://www.xiaohongshu.com/','https://www.xiaohongshu.com'} and slot.get('owned') and slot.get('state')=='created' and slot.get('last_url')=='https://www.xiaohongshu.com/explore' and not slot.get('verified_at') and not slot.get('navigation_intent'):
         raise BridgeError('CONTENT_LOADING')
     safe_url(meta['url'])
     def target(value):
@@ -667,6 +667,9 @@ def ready_capture(project,b,driver,role,args):
     meta=verify_tab(driver,b,role)
     key=hashlib.sha256(meta['url'].encode()).hexdigest()
     activations=b.setdefault('activation_attempts',{})
+    if (args.get('backgroundText') is not True and meta.get('visible') is False
+            and b.get('tabs',{}).get(role,{}).get('owned') is not True):
+        raise BridgeError('TARGET_NOT_VISIBLE')
     if args.get('backgroundText') is not True and meta.get('visible') is False and key not in activations:
         activations[key]=legacy.now();save_binding(project.path,b['binding_name'],b)
         driver.call('activate',b,role)
@@ -1371,6 +1374,15 @@ def prepare_target(project,b,driver,task,*,text_only=False):
         meta=recover_owned_role(project.path,b['binding_name'],b,driver,role)
     args={'stage':stage,'expectedPath':urlparse(url).path}
     if stage=='search':args['query']=p['target']
+    # Lazy listing grids may not lay out in an inactive tab. Select only the
+    # collector-owned role before navigation/reading, never a borrowed user tab
+    # or its OS window. This is normal target preparation, not a fault retry.
+    if (text_only and background_text_allowed(b,stage) and stage in {'search','author'}
+            and b['tabs'][role].get('owned') is True and meta.get('visible') is False):
+        selected=driver.call('activate',b,role)
+        if selected.get('activated')!=meta['page'] or selected.get('windowFocusRequested') is not False:
+            raise BridgeError('TARGET_RELATION_UNCONFIRMED')
+        meta=verify_tab(driver,b,role)
     current=meta['url'];changed=target_path(urlparse(current).path)!=target_path(urlparse(url).path) or (stage=='search' and parse_qs(urlparse(current).query).get('keyword')!=[p['target']])
     if changed:
         # Persist before sending so an uncertain command is never blindly resent.
@@ -1399,6 +1411,7 @@ def prepare_target(project,b,driver,task,*,text_only=False):
     # role tab. Use the final document after navigation, never the old page's
     # visibility. This selects the existing tab, not its window or a new lease.
     if meta.get('visible') is False:
+        if b['tabs'][role].get('owned') is not True:raise BridgeError('TARGET_NOT_VISIBLE')
         driver.call('activate',b,role)
         meta=verify_tab(driver,b,role)
         authorization=b.get('app_foreground_authorization')
@@ -2091,7 +2104,8 @@ def repair_pagination(project,b,driver,task):
     if p['stage']=='search':
         diagnostic=driver.call('scroll_diagnose',b,role,**args)
         legacy.write_json(project.path/'bridge'/('diagnostic-'+task['id']+'.json'),diagnostic)
-    recovery_actions=('reload',) if args.get('backgroundText') is True else ('activate','reload')
+    recovery_actions=('reload',) if (args.get('backgroundText') is True or
+        b.get('tabs',{}).get(role,{}).get('owned') is not True) else ('activate','reload')
     for action in recovery_actions:
         if rec.get(action):continue
         rec[action]=legacy.now()

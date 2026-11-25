@@ -1,3 +1,4 @@
+import {scrollDiagnosticGuardArgs} from './xhs_bridge_driver.mjs';
 import assert from 'node:assert/strict';
 import fs from 'node:fs';
 import path from 'node:path';
@@ -77,4 +78,9 @@ const limited=fixture(many).layoutDiagnosis;
 assert.equal(limited.css.rulesVisited,2000);assert.equal(limited.css.truncated,true);
 const manyMatches=fixture(Array.from({length:100},()=>({type:1,selectorText:'.feeds-page',style:style({height:'208px'})}))).layoutDiagnosis;
 assert.equal(manyMatches.css.matches.length,32);assert.equal(manyMatches.css.truncated,true);
-console.log('PASS: only scrollDiagnoseDom changed; 208px CSS/inline/variables; 12 nodes/6 cards; SecurityError; media/selector/value privacy; 2000-rule/32-match caps; no interactions');
+console.log('PASS: bounded read-only layout diagnostic; 208px CSS/inline/variables; 12 nodes/6 cards; SecurityError; media/selector/value privacy; 2000-rule/32-match caps; no interactions');
+
+const diagnosticInput={uid:'1'.repeat(24),stage:'search',query:'Synthetic query',expectedPath:'/search_result/',backgroundText:true};
+assert.deepEqual(scrollDiagnosticGuardArgs(diagnosticInput),{...diagnosticInput,backgroundText:false,guardOnly:true});
+assert.equal(diagnosticInput.backgroundText,true);
+console.log('PASS: read-only diagnostic retains account, URL, query and access guards while allowing collapsed geometry');
