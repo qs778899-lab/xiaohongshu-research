@@ -94,6 +94,20 @@ class BackgroundTextTests(unittest.TestCase):
             b.prepare_target(self.project,self.binding,driver,task,text_only=True)
         self.assertNotIn('activate',[x[0] for x in driver.calls])
 
+    def test_comment_render_selection_requires_owned_target_and_valid_confirmation(self):
+        for stage in ['roots','replies']:
+            self.body['payload']['stage']=stage
+            driver=VisibilityFake()
+            with self.assertRaisesRegex(b.BridgeError,'^TARGET_RELATION_UNCONFIRMED$'):
+                b.prepare_target(self.project,self.binding,driver,self.body,text_only=True)
+            self.assertEqual([x[0] for x in driver.calls].count('activate'),1)
+            self.assertNotIn('deep',[x[0] for x in driver.calls])
+        self.binding['tabs']['detail']['owned']=False
+        driver=VisibilityFake()
+        result=b.prepare_target(self.project,self.binding,driver,self.body,text_only=True)
+        self.assertTrue(result[2]['backgroundText'])
+        self.assertNotIn('activate',[x[0] for x in driver.calls])
+
     def test_loading_hidden_user_tab_does_not_activate_or_reload(self):
         self.binding['tabs']['detail']['owned']=False
         driver=VisibilityFake()
@@ -153,6 +167,9 @@ class BackgroundTextTests(unittest.TestCase):
     def test_background_deep_flag_is_invocation_local_not_stored_authority(self):
         class Deep(VisibilityFake):
             def call(self,action,binding=None,role=None,**fields):
+                if action=='activate':
+                    self.calls.append((action,binding['context_id'],role,fields));self.visible=True
+                    return {'activated':binding['tabs'][role]['page'],'windowFocusRequested':False}
                 if action=='deep':
                     self.calls.append((action,binding['context_id'],role,fields))
                     return {'results':[],'deepCoverage':{'threads':[]}}
@@ -163,7 +180,7 @@ class BackgroundTextTests(unittest.TestCase):
         fields=[x[3] for x in driver.calls if x[0]=='deep'][0]
         self.assertIs(fields['backgroundText'],True)
         self.assertNotIn('backgroundText',fields['progress'])
-        self.assertNotIn('activate',[x[0] for x in driver.calls])
+        self.assertEqual([x[0] for x in driver.calls].count('activate'),1)
 
     def test_pagination_recovery_does_not_reintroduce_activation_in_background(self):
         self.binding['tabs']['search']=dict(self.binding['tabs']['detail'])

@@ -1374,10 +1374,10 @@ def prepare_target(project,b,driver,task,*,text_only=False):
         meta=recover_owned_role(project.path,b['binding_name'],b,driver,role)
     args={'stage':stage,'expectedPath':urlparse(url).path}
     if stage=='search':args['query']=p['target']
-    # Lazy listing grids may not lay out in an inactive tab. Select only the
+    # Lazy grids and comment pagination may not render in an inactive tab. Select only the
     # collector-owned role before navigation/reading, never a borrowed user tab
     # or its OS window. This is normal target preparation, not a fault retry.
-    if (text_only and background_text_allowed(b,stage) and stage in {'search','author'}
+    if (text_only and background_text_allowed(b,stage) and stage in {'search','author','roots','replies'}
             and b['tabs'][role].get('owned') is True and meta.get('visible') is False):
         selected=driver.call('activate',b,role)
         if selected.get('activated')!=meta['page'] or selected.get('windowFocusRequested') is not False:

@@ -23,6 +23,9 @@ class HiddenDriver(fixture.VisibilityFake):
     def close(self):pass
 
     def call(self,action,binding=None,role=None,**fields):
+        if action=='activate':
+            self.calls.append((action,binding['context_id'],role,fields));self.visible=True
+            return {'activated':binding['tabs'][role]['page'],'windowFocusRequested':False}
         if action in {'capture','deep'} and self.project:
             records=self.project.task(self.task_id)['payload']['bridge']['visibility_repair_probes']
             self.intent_observed=any(r['status']=='started' for r in records.values())
@@ -97,7 +100,7 @@ class VisibilityRecovery(unittest.TestCase):
         self.run_work();pr=self.progress()
         self.assertTrue(self.driver.intent_observed);self.assertTrue(pr['hashes']);self.assertNotIn('fault',pr)
         self.assertTrue(pr['awaiting_review']);self.assertFalse(pr['collection_end'])
-        self.assertIn('deep',[x[0] for x in self.driver.calls]);self.assertNotIn('activate',[x[0] for x in self.driver.calls])
+        self.assertIn('deep',[x[0] for x in self.driver.calls]);self.assertEqual([x[0] for x in self.driver.calls].count('activate'),1)
 
     def test_unconfirmed_visibility_fault_uses_same_actual_verification(self):
         fault=copy.deepcopy(self.fault);fault['code']='TARGET_VISIBILITY_UNCONFIRMED'
