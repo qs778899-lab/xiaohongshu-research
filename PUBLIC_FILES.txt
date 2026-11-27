@@ -199,3 +199,5 @@ scripts/test_manual_binding_fork.py
 references/public-reply-verification.md
 scripts/test_public_reply_check.py
 scripts/xhs_public_reply_check.py
+scripts/test_bridge_fast_mode.mjs
+scripts/test_gemini_bridge_compat.py

@@ -8,6 +8,7 @@ import hashlib
 import json
 import os
 from pathlib import Path
+import random
 import re
 import subprocess
 import sys
@@ -630,7 +631,7 @@ def verify_tab(driver,b,role):
     return meta
 
 
-def ready_capture(project,b,driver,role,args):
+def ready_capture(project,b,driver,role,args,*,fast_mode=False):
     """Retry observation, not navigation. One persisted reload per failed target."""
     layout_unsettled=False
     for attempt in range(3):
@@ -638,7 +639,7 @@ def ready_capture(project,b,driver,role,args):
         except BridgeError as exc:
             if exc.code=='BACKGROUND_LAYOUT_UNSETTLED':layout_unsettled=True
             elif exc.code not in {'CONTENT_LOADING','IDENTITY_UNCONFIRMED'}:raise
-            if attempt<2:time.sleep(1)
+            if attempt<2:time.sleep(0.4 if fast_mode else 1)
     if layout_unsettled:
         # A newly navigated background search may have decoded cards but no
         # masonry layout yet. Select only the registered owned tab once; keep
@@ -1137,7 +1138,8 @@ def _validate_capture_diagnostic(project,task,receipt):
     require(receipt.get('kind')=='failed_media_capture_diagnostic_v1'
             and receipt.get('task_id')==task['id'] and receipt.get('target')==p['target'],
             'CAPTURE_DIAGNOSTIC_TARGET_MISMATCH')
-    require(receipt.get('reviewer')=='codex' and receipt.get('inspection_method')=='view_image'
+    require(receipt.get('reviewer') in {'codex','gemini'}
+            and receipt.get('inspection_method') in {'view_image','gemini_multimodal','read_file'}
             and receipt.get('visual_checked') is True and receipt.get('target_context_verified') is True
             and receipt.get('classification')=='target_image_region_blank'
             and receipt.get('media_content_readable') is False
@@ -1363,7 +1365,7 @@ def background_text_allowed(binding,stage):
     return binding.get('background_text_collection') is True and stage in DOM_TEXT_STAGES
 
 
-def prepare_target(project,b,driver,task,*,text_only=False):
+def prepare_target(project,b,driver,task,*,text_only=False,fast_mode=False):
     if task.get('payload',{}).get('target') in b.get('manual_excluded_note_ids',[]):
         raise BridgeError('ORIGINAL_NOTE_ACCESS_UNRESOLVED')
     p=task['payload'];stage=p['stage'];role='search' if stage=='search' else 'detail'
@@ -1395,11 +1397,13 @@ def prepare_target(project,b,driver,task,*,text_only=False):
             # The submitted command may have succeeded. Observe its exact target;
             # never repeat navigation merely because the response was lost.
         # Bounded readiness, not repeated navigations; identity may load asynchronously.
-        for attempt in range(3):
-            time.sleep(1)
+        attempts=5 if fast_mode else 3
+        wait_step=0.5 if fast_mode else 1
+        for attempt in range(attempts):
+            time.sleep(wait_step)
             try:meta=verify_tab(driver,b,role);break
             except BridgeError as exc:
-                if exc.code not in {'IDENTITY_UNCONFIRMED','CONTENT_LOADING'} or attempt==2:raise
+                if exc.code not in {'IDENTITY_UNCONFIRMED','CONTENT_LOADING'} or attempt==attempts-1:raise
     # This opt-in is invocation-specific: media can use a body task, but never
     # opts into text_only. Identity, URL, CDP target and all readiness guards
     # above remain mandatory even when the operating-system window is behind.
@@ -1431,7 +1435,58 @@ def prepare_target(project,b,driver,task,*,text_only=False):
     return url,role,args
 
 
-def collect_one(project,b,driver,task,force_advance=False,*,root_repair_probe=None,discovered_reply_probe=None):
+def _validate_deep_options(options):
+    if options is None:return {}
+    if not isinstance(options,dict):raise BridgeError('DEEP_OPTIONS_INVALID')
+    allowed={'deepRoots':(1,60),'deepReplyClicks':(1,6),'deepBudgetMs':(2000,15000)}
+    result={}
+    for key,value in options.items():
+        if key not in allowed or type(value) is not int:raise BridgeError('DEEP_OPTIONS_INVALID')
+        lo,hi=allowed[key]
+        if not lo<=value<=hi:raise BridgeError('DEEP_OPTIONS_INVALID')
+        result[key]=value
+    return result
+
+
+def fast_verify_and_capture(project,b,driver,task):
+    """Single-round-trip guarded capture when the bound background tab is already on target."""
+    p=task['payload'];stage=p['stage']
+    if stage not in {'search','author','body'} or not background_text_allowed(b,stage):return None
+    if p.get('target') in b.get('manual_excluded_note_ids',[]):raise BridgeError('ORIGINAL_NOTE_ACCESS_UNRESOLVED')
+    role='search' if stage=='search' else 'detail'
+    slot=b.get('tabs',{}).get(role,{})
+    if not slot.get('page') or slot.get('navigation_intent') or not slot.get('last_url'):return None
+    url=observed_url(project.path,task)
+    expected_parsed=urlparse(url);last_parsed=urlparse(slot['last_url'])
+    same_target=(target_path(last_parsed.path)==target_path(expected_parsed.path)
+                 and (stage!='search' or parse_qs(last_parsed.query).get('keyword')==[p['target']]))
+    if not same_target:return None
+    args={'stage':stage,'expectedPath':expected_parsed.path,'backgroundText':True}
+    if stage=='search':args['query']=p['target']
+    try:
+        data=driver.call('verified_capture',b,role,**args)
+    except BridgeError as exc:
+        if exc.code in {'TARGET_MISMATCH','QUERY_MISMATCH','CONTENT_LOADING','BACKGROUND_LAYOUT_UNSETTLED','TARGET_MISSING','ACTION_NOT_ALLOWED'}:
+            return None
+        raise
+    if not isinstance(data,dict) or data.get('page')!=slot['page']:raise BridgeError('TARGET_MISMATCH')
+    safe_url(data.get('url',''))
+    if data.get('uid')!=b['account_uid']:raise BridgeError('ACCOUNT_MISMATCH')
+    if not isinstance(data.get('visible'),bool):raise BridgeError('TARGET_VISIBILITY_UNCONFIRMED')
+    actual=urlparse(data['url'])
+    if (target_path(actual.path)!=target_path(expected_parsed.path)
+            or (stage=='search' and parse_qs(actual.query).get('keyword')!=[p['target']])):
+        raise BridgeError('UNEXPECTED_TARGET_CHANGE')
+    if data.get('windowId') is not None:
+        if (b.get('manual_single_tab') and slot.get('window_id') is not None
+                and slot['window_id']!=data['windowId']):
+            raise BridgeError('TARGET_MISMATCH')
+        slot['window_id']=data['windowId']
+    slot.update(last_url=data['url'],verified_at=legacy.now())
+    return url,role,args,data
+
+
+def collect_one(project,b,driver,task,force_advance=False,*,root_repair_probe=None,discovered_reply_probe=None,fast_mode=False,deep_options=None):
     p=task['payload'];stage=p['stage']
     reply_marker=discovered_reply_probe or active_discovered_reply_scope(project,task)
     if reply_marker is not None:
@@ -1451,7 +1506,13 @@ def collect_one(project,b,driver,task,force_advance=False,*,root_repair_probe=No
                 or root_repair_probe.get('noteId')!=p['target']
                 or root_repair_probe.get('acquisition')!=len(attempt.get('observations',[]))+1):
             raise BridgeError('ROOT_REPAIR_PROBE_AUTHORITY_REQUIRED')
-    url,role,args=prepare_target(project,b,driver,task,text_only=True)
+    deep_fields=_validate_deep_options(deep_options) if stage in {'roots','replies'} else {}
+    fast_hit=fast_verify_and_capture(project,b,driver,task) if fast_mode and stage in {'search','author','body'} else None
+    if fast_hit is not None:
+        url,role,args,data=fast_hit
+    else:
+        url,role,args=prepare_target(project,b,driver,task,text_only=True,fast_mode=fast_mode)
+        data=None
     if stage in {'roots','replies'}:
         shared=project.path/'bridge'/'comment-progress'/(p['target']+'.json')
         prior=legacy.read_json(shared,p.get('bridge',{}).get('comments',{}))
@@ -1463,7 +1524,7 @@ def collect_one(project,b,driver,task,force_advance=False,*,root_repair_probe=No
             driver_progress['rootRepairProbe']=dict(root_repair_probe)
         if reply_marker is not None:driver_progress['discoveredReplyScope']=dict(reply_marker)
         data=driver.call('deep',b,role,url=url,progress=driver_progress,
-                         backgroundText=args.get('backgroundText') is True)
+                         backgroundText=args.get('backgroundText') is True,**deep_fields)
         if not isinstance(data,dict):raise BridgeError('INVALID_COMMENT_SNAPSHOT')
         data['url']=url
         if reply_marker is not None:
@@ -1480,22 +1541,24 @@ def collect_one(project,b,driver,task,force_advance=False,*,root_repair_probe=No
                 thread['state']='visible_replies_read'
                 thread['prior_capture_source']=old.get('last_snapshot','')
     else:
-        data=ready_capture(project,b,driver,role,args)
+        if data is None:
+            data=ready_capture(project,b,driver,role,args,fast_mode=fast_mode)
         if stage=='search':
             label={'general':'综合','latest':'最新','popular':'最多点赞'}[p['sort']]
             if label not in data.get('selected',[]):
                 for attempt in range(2):
                     action=driver.call('advance',b,role,sort=p['sort'],**args)
-                    time.sleep(1)
-                    data=ready_capture(project,b,driver,role,args)
+                    time.sleep(0.5 if fast_mode else 1)
+                    data=ready_capture(project,b,driver,role,args,fast_mode=fast_mode)
                     if label in data.get('selected',[]) or action.get('action')=='sort_clicked':break
                 if label not in data.get('selected',[]):raise BridgeError('SORT_UNCONFIRMED')
             verified_sort={'label':label,'url':data['url'],'at':legacy.now(),
                            'selected_before_close':list(data.get('selected',[])),
                            'verified_before_close':True}
-            driver.call('advance',b,role,dismissFilters=True,**args)
-            time.sleep(1)
-            data=ready_capture(project,b,driver,role,args)
+            dismissed=driver.call('advance',b,role,dismissFilters=True,**args)
+            if not (fast_mode and isinstance(dismissed,dict) and dismissed.get('action')=='filter_already_closed'):
+                time.sleep(0.4 if fast_mode else 1)
+                data=ready_capture(project,b,driver,role,args,fast_mode=fast_mode)
             data['sortVerification']=verified_sort
         if stage in {'search','author'}:
             previous_top=p.get('bridge',{}).get('cursor',{}).get('scrollTop',0)
@@ -1508,8 +1571,8 @@ def collect_one(project,b,driver,task,force_advance=False,*,root_repair_probe=No
                 store_capture(project,project.task(task['id']),data,count_stall=False)
                 anchor=p.get('bridge',{}).get('cursor',{}).get('lastNoteId')
                 restoration=driver.call('advance',b,role,resumeTop=previous_top,anchor=anchor,**args)
-                time.sleep(1)
-                data=ready_capture(project,b,driver,role,args)
+                time.sleep(0.5 if fast_mode else 1)
+                data=ready_capture(project,b,driver,role,args,fast_mode=fast_mode)
                 if stage=='search':data['sortVerification']=verified_sort
                 restored=store_capture(project,project.task(task['id']),data,count_stall=False)
                 position=data.get('position') or {}
@@ -1543,10 +1606,10 @@ def collect_one(project,b,driver,task,force_advance=False,*,root_repair_probe=No
     if stage in {'search','author'} and (force_advance or not result['awaiting_review']):
         # Cards can precede layout. Capture the post-scroll state before another
         # task navigates this shared role, preserving both discoveries and cursor.
-        time.sleep(2)
+        time.sleep(0.4 if fast_mode else 2)
         driver.call('advance',b,role,**args)
-        time.sleep(1)
-        after=ready_capture(project,b,driver,role,args)
+        time.sleep(0.8 if fast_mode else 1)
+        after=ready_capture(project,b,driver,role,args,fast_mode=fast_mode)
         if stage=='search':after['sortVerification']=verified_sort
         result=store_capture(project,project.task(task['id']),after)
     return result
@@ -2143,11 +2206,13 @@ def observed_comment_ids(project,note):
     return ids
 
 
-def work(project,name,units=10,max_seconds=300,interval=10,task_ids=None,emit=None,review_limit=20,search_pages=5,round_id=None,home_restore_authorization=None,**unused):
+def work(project,name,units=10,max_seconds=300,interval=10,task_ids=None,emit=None,review_limit=20,search_pages=5,round_id=None,home_restore_authorization=None,*,actor='codex',fast_mode=False,non_blocking_review=False,max_review_backlog=20,jitter_seconds=0.0,deep_options=None,stop_event=None,**unused):
     from xhs_batch import batch_lock,select_ready,routing_group
     import xhs_rounds as rounds
     wall_started=time.monotonic()
-    if not 1<=units<=100 or not 1<=max_seconds<=3600 or interval<3:raise BridgeError('INVALID_BUDGET')
+    if actor not in {'codex','gemini'}:raise BridgeError('INVALID_ACTOR')
+    if not 1<=units<=100 or not 1<=max_seconds<=3600 or interval<3 or jitter_seconds<0 or jitter_seconds>interval or max_review_backlog<1:raise BridgeError('INVALID_BUDGET')
+    validated_deep=_validate_deep_options(deep_options) if deep_options is not None else None
     b=load_binding(project,name);driver=Driver(b['runtime']);started=time.monotonic();done=0
     if home_restore_authorization:
         b['allow_home_restore']={'authorization':home_restore_authorization,'at':legacy.now()};save_binding(project,name,b)
@@ -2161,11 +2226,16 @@ def work(project,name,units=10,max_seconds=300,interval=10,task_ids=None,emit=No
             while done<units and time.monotonic()-started<max_seconds:
                 if round_id:allowed=set(rounds.task_ids(db,round_id))
                 if pause.exists():result.update(event='paused',reason='requested');break
+                if stop_event is not None and stop_event.is_set():result.update(event='paused',reason='stop_requested');break
                 # Project.task normally recomputes all event health. Share one
                 # explicit snapshot for this scheduling decision only; fresh
                 # browser/account leases remain mandatory for every unit.
                 dispatch=native.dispatch_snapshot(db)
                 allrows=[db.task(r[0],native_dispatch=dispatch) for r in db.db.execute("SELECT id FROM tasks WHERE kind='native'")]
+                if non_blocking_review:
+                    pending_reviews=sum(1 for t in allrows if t['status']!='complete' and t['payload'].get('bridge',{}).get('awaiting_review'))
+                    if pending_reviews>=max_review_backlog:
+                        result.update(event='handoff',reason='review_backlog_backpressure',pending_reviews=pending_reviews);break
                 if round_id:
                     routes=rounds.scheduler_routes(db,round_id,tasks=allrows,native_dispatch=dispatch)
                     for t in allrows:t['payload']['routing_doctors']=routes.get(t['id'],[])
@@ -2200,7 +2270,7 @@ def work(project,name,units=10,max_seconds=300,interval=10,task_ids=None,emit=No
                     rows.append(t)
                 if (b.get('web_channel_authorization') or b.get('web_parent_authorization')) and not b.get('web_validation'):rows=[t for t in rows if t['payload']['stage']=='body']
                 if not rows:
-                    result.update(event='handoff',reason='codex_review_or_remaining_gaps');break
+                    result.update(event='handoff',reason='codex_review_or_remaining_gaps' if actor=='codex' else 'gemini_review_or_remaining_gaps');break
                 task=select_ready(rows,state,selection_ids);unit_start=time.monotonic();calls_before=getattr(driver,'metrics',{}).get('calls',0)
                 comment_ids_before=observed_comment_ids(db,task['payload']['target']) if task['payload']['stage'] in {'roots','replies'} else set()
                 try:
@@ -2214,7 +2284,11 @@ def work(project,name,units=10,max_seconds=300,interval=10,task_ids=None,emit=No
                                 if background_visibility_candidate(task,b):
                                     r=collect_background_visibility_probe(db,b,driver,task,'Explicit background text mode; verify the saved visibility hold once')
                                 elif task['payload'].get('bridge',{}).get('fault',{}).get('code')=='PAGINATION_STALLED':r=repair_pagination(db,b,driver,task)
-                                else:r=collect_one(db,b,driver,task)
+                                else:
+                                    extra={}
+                                    if fast_mode:extra['fast_mode']=True
+                                    if validated_deep:extra['deep_options']=validated_deep
+                                    r=collect_one(db,b,driver,task,**extra)
                             except Exception as exc:save_failure(project,name,b,exc,keys);raise
                             b['state']='ready';b['last_success']={'task':task['id'],'at':legacy.now()};save_binding(project,name,b)
                 except legacy.CollectionBusy:
@@ -2248,10 +2322,19 @@ def work(project,name,units=10,max_seconds=300,interval=10,task_ids=None,emit=No
                 db.db.execute('INSERT INTO execution_metrics(task_id,body,at) VALUES(?,?,?)',(task['id'],rounds.packed(metric),legacy.now()));db.db.commit()
                 if task['payload']['stage']=='search':search_units+=1
                 if emit:emit({'event':'unit','task_id':task['id'],**r})
-                if state['group_units']>=10 or search_units>=search_pages or done>=review_limit:
-                    result.update(event='handoff',reason='codex_reading_checkpoint');break
-                if done<units:time.sleep(interval)
-            result.update(processed_units=done,actor='codex',requires_user_input=False,metrics=getattr(driver,'metrics',{}))
+                if not non_blocking_review and (state['group_units']>=10 or search_units>=search_pages or done>=review_limit):
+                    result.update(event='handoff',reason='codex_reading_checkpoint' if actor=='codex' else 'gemini_reading_checkpoint');break
+                if done<units:
+                    sleep_for=max(3.0,interval+random.uniform(-jitter_seconds,jitter_seconds)) if jitter_seconds else interval
+                    if r.get('local_gap')=='CONTENT_LOADING':sleep_for=min(60.0,sleep_for*1.5)
+                    if stop_event is None and not jitter_seconds and r.get('local_gap')!='CONTENT_LOADING':
+                        time.sleep(sleep_for)
+                    else:
+                        deadline=time.monotonic()+sleep_for
+                        while time.monotonic()<deadline:
+                            if pause.exists() or (stop_event is not None and stop_event.is_set()):break
+                            time.sleep(min(0.25,max(0.0,deadline-time.monotonic())))
+            result.update(processed_units=done,actor=actor,requires_user_input=False,metrics=getattr(driver,'metrics',{}))
         except KeyboardInterrupt:
             legacy.write_json(pause,{'at':legacy.now(),'reason':'user_interrupted'});result.update(event='paused',reason='user_interrupted',processed_units=done)
         finally:db.close();driver.close()

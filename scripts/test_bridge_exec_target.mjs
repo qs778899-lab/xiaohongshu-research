@@ -5,7 +5,7 @@ import path from 'node:path';
 import vm from 'node:vm';
 import {pathToFileURL} from 'node:url';
 import {executeBoundDom,captureBoundScreenshot,publicUrl,requirePinnedProfile,
-  inspectDom,selectResults,scrollDiagnoseDom,requireScrollDiagnosticTarget,commentMediaStateDom,commentStructureDom,carouselDom,advanceDom} from './xhs_bridge_driver.mjs';
+  inspectDom,selectResults,scrollDiagnoseDom,scrollDiagnosticGuardArgs,requireScrollDiagnosticTarget,commentMediaStateDom,commentStructureDom,carouselDom,advanceDom} from './xhs_bridge_driver.mjs';
 
 import {connectorStatus} from './xhs_connector_health.mjs';
 
@@ -68,7 +68,7 @@ const invoke=async(action,options={})=>{
   };
   const context={fs:{readFileSync:()=>JSON.stringify({name:'@jackwener/opencli',version:'2.0.2'})},path,pathToFileURL,URL,
     publicUrl,requirePinnedProfile,executeBoundDom,captureBoundScreenshot,domSource,inspectDom,commentMediaStateDom,commentStructureDom,connectorStatus,
-    scrollDiagnoseDom,requireScrollDiagnosticTarget,carouselDom,advanceDom,buildDeepExtractor:()=>'(synthetic bounded deep expression)',
+    scrollDiagnoseDom,scrollDiagnosticGuardArgs,requireScrollDiagnosticTarget,carouselDom,advanceDom,buildDeepExtractor:()=>'(synthetic bounded deep expression)',
     fixtureAdapter:{buildCommentsExtractJs:()=>{}},fixtureLoad:async name=>{assert.ok(name in modules,name);return modules[name];}};
   vm.createContext(context);vm.runInContext(mainCode+';globalThis.run=main;',context);
   try {return {result:await context.run({...base,action,...options.cfg}),calls,pageCalls};}

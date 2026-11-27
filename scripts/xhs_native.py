@@ -299,7 +299,7 @@ def validate_saved_original_body(task, receipt):
             and receipt.get('complete') is True and receipt.get('reviewed') is True
             and receipt.get('content_observed') is True,
             'Saved original body reading is an explicit offline text review')
-    require(receipt.get('reader') == 'codex' and receipt.get('full_body_read') is True
+    require(receipt.get('reader') in {'codex', 'gemini'} and receipt.get('full_body_read') is True
             and receipt.get('title_read') is True and receipt.get('source_body_complete') is True
             and receipt.get('body_text_truncated') is False and receipt.get('unread_body_segments') == [],
             'Actual complete saved body reading must be attested')

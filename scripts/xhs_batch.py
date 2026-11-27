@@ -518,6 +518,8 @@ def main():
             arg.add_argument("--run", type=Path)
             arg.add_argument("--transport", choices=("legacy", "bridge"), default="legacy")
             arg.add_argument("--binding", help="Explicit project bridge binding")
+            arg.add_argument("--actor", choices=("codex", "gemini"), default="codex")
+            arg.add_argument("--fast-mode", action="store_true")
             arg.add_argument("--home-restore-authorization", help="Existing explicit authorization; only owned homepage recovery")
             arg.add_argument("--units", type=int, default=10)
             arg.add_argument("--max-seconds", type=int, default=1800 if command == "work" else 600)
@@ -540,6 +542,8 @@ def main():
                     review_limit=args.review_limit, search_pages=args.search_pages,
                     round_id=args.round_id,
                     home_restore_authorization=args.home_restore_authorization,
+                    actor=args.actor,
+                    fast_mode=args.fast_mode,
                     emit=lambda value: print(json.dumps(value, ensure_ascii=False), flush=True) if value.get('event')=='unit' else None)
         if args.checkpoint_file:
             args.checkpoint_file.parent.mkdir(parents=True,exist_ok=True)

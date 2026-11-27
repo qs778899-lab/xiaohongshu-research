@@ -1127,7 +1127,7 @@ async function main(cfg) {
       throw new Error('USER_TAB_CHANGED');
     return {page:result.page,url:after.url,chromeTabId:after.id,windowId:after.windowId,owned:false};
   }
-  if (!['profiles','doctor','create','lease_status','probe_registered_target','locate_registered_url','registered_window_state','metadata','identity','capture','advance','navigate','reload','activate','close','deep','screenshot','media_state','media_select','scroll_diagnose','comment_diagnose','comment_media_state','comment_media_focus','comment_media_open','comment_media_viewer_state','comment_media_display_state','comment_media_enlarge','comment_media_restore'].includes(cfg.action)) throw new Error('ACTION_NOT_ALLOWED');
+  if (!['profiles','doctor','create','lease_status','probe_registered_target','locate_registered_url','registered_window_state','metadata','identity','capture','verified_capture','advance','navigate','reload','activate','close','deep','screenshot','media_state','media_select','scroll_diagnose','comment_diagnose','comment_media_state','comment_media_focus','comment_media_open','comment_media_viewer_state','comment_media_display_state','comment_media_enlarge','comment_media_restore'].includes(cfg.action)) throw new Error('ACTION_NOT_ALLOWED');
   const pkg=path.resolve(cfg.packageRoot);
   const meta=JSON.parse(fs.readFileSync(path.join(pkg,'package.json'),'utf8'));
   if (meta.name!=='@jackwener/opencli' || meta.version!=='2.0.2') throw new Error('CAPABILITY_MISMATCH');
@@ -1228,6 +1228,14 @@ async function main(cfg) {
       actualPage=result.page;
       return result.data;
     };
+    if (cfg.action==='verified_capture') {
+      const args={uid:cfg.uid,stage:cfg.stage,query:cfg.query,expectedPath:cfg.expectedPath,
+        ...(cfg.backgroundText===true?{backgroundText:true}:{})};
+      const data=await evaluateOnce(`(${domSource(inspectDom)})(${JSON.stringify(args)})`);
+      if (!data || typeof data!=='object') throw new Error('CAPTURE_UNCONFIRMED');
+      if (data.error) throw new Error(data.error);
+      return {...data,page:actualPage,windowId:target.windowId ?? null};
+    }
     const opts={uid:cfg.uid,guardOnly:true};
     const check=await evaluateOnce(`(${domSource(inspectDom)})(${JSON.stringify(opts)})`);
     if (check.error) throw new Error(check.error);
@@ -1296,7 +1304,14 @@ async function main(cfg) {
     if (!noteId(cfg.url) || noteId(target.url)!==noteId(cfg.url)) throw new Error('TARGET_MISMATCH');
     if (!check.visible && cfg.backgroundText!==true) await page.selectTab(cfg.tab);
     const adapter=await import(pathToFileURL(path.join(pkg,'clis/xiaohongshu/comments.js')).href);
-    const expression=buildDeepExtractor(adapter.buildCommentsExtractJs,{url:cfg.url,roots:30,maxReplyClicks:2,budgetMs:8000,progress:cfg.progress || {},accountUid:cfg.uid,yieldOnWait:true});
+    const deepRoots=cfg.deepRoots===undefined?30:cfg.deepRoots;
+    const deepReplyClicks=cfg.deepReplyClicks===undefined?2:cfg.deepReplyClicks;
+    const deepBudgetMs=cfg.deepBudgetMs===undefined?8000:cfg.deepBudgetMs;
+    if(!Number.isInteger(deepRoots)||deepRoots<1||deepRoots>60||
+       !Number.isInteger(deepReplyClicks)||deepReplyClicks<1||deepReplyClicks>6||
+       !Number.isInteger(deepBudgetMs)||deepBudgetMs<2000||deepBudgetMs>15000)
+      throw new Error('DEEP_OPTIONS_INVALID');
+    const expression=buildDeepExtractor(adapter.buildCommentsExtractJs,{url:cfg.url,roots:deepRoots,maxReplyClicks:deepReplyClicks,budgetMs:deepBudgetMs,progress:cfg.progress || {},accountUid:cfg.uid,yieldOnWait:true});
     // No goto()/upstream stale-target fallback, no network replay or stealth injection.
     let data;
     try {data=await evaluateOnce(expression);}
