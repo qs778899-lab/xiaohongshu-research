@@ -1162,21 +1162,24 @@ export async function publicReplyDom(opts) {
     if (bar) {
       const inactiveCover = bar.querySelector?.('.not-active, .inner-when-not-active');
       if (inactiveCover && visible(inactiveCover)) return false;
-      const cls = String(bar.className || '').split(/\s+/);
-      if (cls.includes('engage-bar') && !cls.includes('active')) return false;
+      const bottom = bar.querySelector?.('.bottom');
+      if (bottom && typeof bottom.getBoundingClientRect === 'function') {
+        const rect = bottom.getBoundingClientRect();
+        if (Number.isFinite(rect?.height) && rect.height < 10) return false;
+      }
     }
     return true;
   };
   const findTrigger = () => {
     const selectors = [
-      '.engage-bar-container .not-active.inner-when-not-active',
-      '.engage-bar-container .not-active',
+      '.engage-bar-container .not-active .inner',
+      '.engage-bar-container .inner-when-not-active .inner',
+      '.engage-bar-container .chat-wrapper',
       '.engage-bar-container .input-box',
       '.engage-bar .input-box',
       '.interact-container .input-box',
       '.engage-bar .content-edit',
       '.comment-wrapper .input-box',
-      '.engage-bar-container .chat-wrapper',
     ];
     for (const sel of selectors) {
       const el = [...scope.querySelectorAll(sel)].find(visible);

@@ -285,4 +285,42 @@ let checks = 0;
   checks++;
 }
 
+// 6. Top-level comment activates via .not-active .inner even when .engage-bar lacks .active class
+{
+  let innerClicks = 0, submitClicks = 0, expanded = false;
+  const noteAuthor = makeNode('a', {attrs: {href: `/user/profile/${OTHER_UID}`}, text: 'Author'});
+  const composer = makeNode('p', {attrs: {id: 'content-textarea', contenteditable: 'true'}, visible: true});
+  const inner = makeNode('div', {
+    cls: 'inner', text: '说点什么...', visible: true,
+    onClick: () => { innerClicks++; expanded = true; },
+  });
+  const inactiveCover = makeNode('div', {cls: 'not-active inner-when-not-active', children: [inner], visible: true});
+  Object.defineProperty(inactiveCover, 'getClientRects', {value: () => expanded ? [] : [{width: 120, height: 36}]});
+  Object.defineProperty(inner, 'getClientRects', {value: () => expanded ? [] : [{width: 120, height: 36}]});
+  const submitBtn = makeNode('button', {
+    cls: 'btn submit', text: '发送', visible: true,
+    onClick: () => { submitClicks++; composer.textContent = ''; },
+  });
+  const bottom = makeNode('div', {cls: 'bottom', children: [submitBtn], visible: true});
+  bottom.getBoundingClientRect = () => ({width: 360, height: expanded ? 56 : 0});
+  const inputBox = makeNode('div', {cls: 'input-box', children: [makeNode('div', {cls: 'content-edit', children: [composer, inactiveCover]})]});
+  const engageBar = makeNode('div', {cls: 'interactions engage-bar', children: [inputBox, bottom]});
+  const doc = makeNode('body', {children: [makeNode('div', {cls: 'note-container', children: [
+    makeNode('div', {cls: 'author', children: [noteAuthor]}),
+    makeNode('div', {cls: 'engage-bar-container', children: [engageBar]}),
+  ]})]});
+
+  const res = await runDom(doc, {
+    action: 'public_reply_submit', expectedPath: `/explore/${NOTE_ID}`, uid: OWN_UID,
+    destination: 'top_level_comment', recipientUid: OTHER_UID,
+    message: 'Top-level synthetic question?', execute: true, intentDigest: DIGEST,
+    postClickPollRounds: 1, postClickPollMs: 0,
+  });
+  assert.equal(innerClicks, 1);
+  assert.equal(submitClicks, 1);
+  assert.equal(res.sendClicked, true);
+  assert.equal(res.composerCleared, true);
+  checks++;
+}
+
 console.log(`PASS: guarded public reply DOM checks: ${checks}`);
