@@ -1233,8 +1233,8 @@ export async function publicReplyDom(opts) {
         if (v) parts.push(String(v));
       }
     }
-    const box = composer?.closest?.('.comment-comp, .engage-bar-container, .engage-bar, .bottom-area, .input-box') || scope;
-    for (const sel of ['.reply-content .reply', '.reply-content', '.reply-info', '.reply-target', '.reply-user', '.reply-to', '.active-reply', '.reply-banner', '.comment-reply-header', '.input-box .placeholder']) {
+    const box = composer?.closest?.('.engage-bar-container, .engage-bar, .comment-comp, .bottom-area') || scope;
+    for (const sel of ['.reply-content .reply', '.reply-content', '.reply-info', '.reply-target', '.reply-user', '.reply-to', '.active-reply', '.reply-banner', '.comment-reply-header']) {
       for (const el of box.querySelectorAll(sel)) {
         if (visible(el)) parts.push(String(el.innerText || el.textContent || '').trim());
       }

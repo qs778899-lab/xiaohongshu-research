@@ -125,16 +125,17 @@ let checks = 0;
   let replyClicks = 0, submitClicks = 0, composerVisible = false, composerHint = '';
   const composer = makeNode('div', {attrs: {id: 'content-textarea', contenteditable: 'true'}, visible: false});
   Object.defineProperty(composer, 'getClientRects', {value: () => composerVisible ? [{width: 200, height: 30}] : []});
-  const hint = makeNode('div', {cls: 'reply-info', text: '', visible: false});
+  const hint = makeNode('div', {cls: 'reply', text: '', visible: false});
   Object.defineProperty(hint, 'getClientRects', {value: () => composerHint ? [{width: 100, height: 18}] : []});
+  const replyContent = makeNode('div', {cls: 'reply-content', children: [hint]});
   const submitBtn = makeNode('button', {
     cls: 'submit', text: '发送', visible: false,
     onClick: () => { submitClicks++; composer.textContent = ''; },
   });
   Object.defineProperty(submitBtn, 'getClientRects', {value: () => composerVisible ? [{width: 60, height: 28}] : []});
-  const replyBtn = makeNode('span', {
-    cls: 'reply', text: '回复',
-    onClick: () => { replyClicks++; composerVisible = true; composerHint = '回复 Synthetic Author'; hint.textContent = composerHint; },
+  const replyBtn = makeNode('div', {
+    cls: 'reply icon-container', text: '回复',
+    onClick: () => { replyClicks++; composerVisible = true; engageBar.className = 'engage-bar active'; composerHint = '回复 Synthetic Author'; hint.textContent = composerHint; },
   });
   const rootAuthorLink = makeNode('a', {cls: 'name', attrs: {href: `/user/profile/${'9'.repeat(24)}`}, text: 'Root Author'});
   const rootItem = makeNode('div', {
@@ -156,7 +157,9 @@ let checks = 0;
   const replyContainer = makeNode('div', {cls: 'reply-container', children: [targetItem]});
   const parent = makeNode('div', {cls: 'parent-comment', attrs: {'data-comment-id': ROOT_CID}, children: [rootItem, replyContainer]});
   const comments = makeNode('div', {cls: 'comments-container', children: [parent]});
-  const bar = makeNode('div', {cls: 'engage-bar-container', children: [hint, composer, submitBtn]});
+  const inputBox = makeNode('div', {cls: 'input-box', children: [makeNode('div', {cls: 'content-edit', children: [composer]})]});
+  const engageBar = makeNode('div', {cls: 'engage-bar', children: [replyContent, inputBox, submitBtn]});
+  const bar = makeNode('div', {cls: 'engage-bar-container', children: [engageBar]});
   const root = makeNode('div', {cls: 'note-container', children: [comments, bar]});
   const doc = makeNode('body', {children: [root]});
 
