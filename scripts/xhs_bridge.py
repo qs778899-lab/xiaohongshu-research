@@ -508,11 +508,14 @@ def _finish_binding_fork(p,b,record,sha,keys,driver=None,resuming=False):
         if owned_driver and driver is not None:driver.close()
 
 
-def bind(project, name, runtime, context_id, profile_label, account_uid, profile_guard_key, authorization, web_authorization=None):
+SUPPORTED_EXTENSION_VERSIONS = {'1.0.26', '1.0.27'}
+
+
+def bind(project, name, runtime, context_id, profile_label, account_uid, profile_guard_key, authorization, web_authorization=None, extension_version='1.0.26'):
     legacy.research_path(project)
     existed=binding_path(project,name).exists()
     try:
-        return _bind(project,name,runtime,context_id,profile_label,account_uid,profile_guard_key,authorization,web_authorization)
+        return _bind(project,name,runtime,context_id,profile_label,account_uid,profile_guard_key,authorization,web_authorization,extension_version=extension_version)
     except legacy.ResearchError as exc:
         # A preflight STOP can occur before any tab is created. Persist that
         # specific failure instead of leaving a misleading provisioning state.
@@ -521,8 +524,9 @@ def bind(project, name, runtime, context_id, profile_label, account_uid, profile
         raise
 
 
-def _bind(project, name, runtime, context_id, profile_label, account_uid, profile_guard_key, authorization, web_authorization=None):
+def _bind(project, name, runtime, context_id, profile_label, account_uid, profile_guard_key, authorization, web_authorization=None, extension_version='1.0.26'):
     identity.uid_key(account_uid)
+    if extension_version not in SUPPORTED_EXTENSION_VERSIONS: raise BridgeError('EXTENSION_CHANGED_RECHECK_REQUIRED')
     if binding_path(project, name).exists(): raise BridgeError('BINDING_ALREADY_EXISTS_USE_RECOVER')
     if not re.fullmatch(r'[\w-]{1,128}', context_id): raise BridgeError('INVALID_CONTEXT_ID')
     if not authorization.strip(): raise BridgeError('AUTHORIZATION_BASIS_REQUIRED')
@@ -531,11 +535,11 @@ def _bind(project, name, runtime, context_id, profile_label, account_uid, profil
     profiles = connected_profiles(driver)
     connected = [p for p in profiles if p['contextId'] == context_id]
     if len(connected) != 1: raise BridgeError('SPECIFIED_PROFILE_OFFLINE')
-    if connected[0].get('extensionVersion') != '1.0.26': raise BridgeError('EXTENSION_CHANGED_RECHECK_REQUIRED')
+    if connected[0].get('extensionVersion') != extension_version: raise BridgeError('EXTENSION_CHANGED_RECHECK_REQUIRED')
     identity.associate(account_uid, profile_guard_key)
     b = {'format': VERSION, 'binding_name':name, 'project': str(Path(project).resolve()), 'profile_label': profile_label,
          'context_id': context_id, 'account_uid': account_uid, 'profile_guard_key': profile_guard_key,
-         'session': 'xhs-'+uuid.uuid4().hex, 'runtime': runtime, 'extension_version':'1.0.26',
+         'session': 'xhs-'+uuid.uuid4().hex, 'runtime': runtime, 'extension_version':extension_version,
          'tabs': {}, 'authorization': authorization, 'state':'provisioning', 'created_at':legacy.now()}
     if web_authorization is not None:
         attach_web_authorization(project, b, web_authorization)
@@ -634,12 +638,13 @@ def verify_tab(driver,b,role):
 def ready_capture(project,b,driver,role,args,*,fast_mode=False):
     """Retry observation, not navigation. One persisted reload per failed target."""
     layout_unsettled=False
-    for attempt in range(3):
+    attempts=5 if fast_mode else 3
+    for attempt in range(attempts):
         try:return driver.call('capture',b,role,**args)
         except BridgeError as exc:
             if exc.code=='BACKGROUND_LAYOUT_UNSETTLED':layout_unsettled=True
             elif exc.code not in {'CONTENT_LOADING','IDENTITY_UNCONFIRMED'}:raise
-            if attempt<2:time.sleep(0.4 if fast_mode else 1)
+            if attempt<attempts-1:time.sleep(0.8 if (fast_mode and exc.code=='BACKGROUND_LAYOUT_UNSETTLED') else (0.5 if fast_mode else 1))
     if layout_unsettled:
         # A newly navigated background search may have decoded cards but no
         # masonry layout yet. Select only the registered owned tab once; keep
@@ -1548,7 +1553,7 @@ def collect_one(project,b,driver,task,force_advance=False,*,root_repair_probe=No
             if label not in data.get('selected',[]):
                 for attempt in range(2):
                     action=driver.call('advance',b,role,sort=p['sort'],**args)
-                    time.sleep(0.5 if fast_mode else 1)
+                    time.sleep(1)
                     data=ready_capture(project,b,driver,role,args,fast_mode=fast_mode)
                     if label in data.get('selected',[]) or action.get('action')=='sort_clicked':break
                 if label not in data.get('selected',[]):raise BridgeError('SORT_UNCONFIRMED')
@@ -2354,6 +2359,7 @@ def main():
     a=s.add_parser('bind');a.add_argument('--runtime',required=True,type=Path)
     for name in ('binding','context-id','profile-label','account-uid','profile-guard-key','authorization'):a.add_argument('--'+name,required=True)
     a.add_argument('--web-authorization',type=Path)
+    a.add_argument('--extension-version',choices=('1.0.26','1.0.27'),default='1.0.26')
     a=s.add_parser('fork-binding')
     for name in ('parent','binding','intent','authorization'):a.add_argument('--'+name,required=True)
     for name in ('status','recover','release'):
@@ -2369,7 +2375,7 @@ def main():
     a=s.add_parser('diagnose-error');a.add_argument('--binding',required=True);a.add_argument('--role',choices=['search','detail'],required=True);a.add_argument('--file',required=True,type=Path)
     a=p.parse_args()
     if a.command in {'doctor','profiles'}:result=Driver(legacy.read_json(a.runtime)).call(a.command,startConnector=getattr(a,'start_connector',False))
-    elif a.command=='bind':result=bind(a.project,a.binding,legacy.read_json(a.runtime),a.context_id,a.profile_label,a.account_uid,a.profile_guard_key,a.authorization,a.web_authorization)
+    elif a.command=='bind':result=bind(a.project,a.binding,legacy.read_json(a.runtime),a.context_id,a.profile_label,a.account_uid,a.profile_guard_key,a.authorization,a.web_authorization,extension_version=a.extension_version)
     elif a.command=='fork-binding':result=fork_binding(a.project,a.parent,a.binding,a.intent,a.authorization)
     elif a.command=='status':
         b=load_binding(a.project,a.binding);result={k:b.get(k) for k in ('state','profile_label','context_id','account_uid','session','tabs','last_error','last_success')}

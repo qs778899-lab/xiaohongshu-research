@@ -30,11 +30,13 @@ export GEMINI_API_KEY="your-api-key"
 # export GEMINI_API_BASE="https://generativelanguage.googleapis.com/v1beta"
 ```
 
-建议先对已有研究绑定开启后台文字模式（避免文字检索抢占 Chrome 前台窗口）：
+建议先对已有研究绑定开启后台文字模式（避免文字检索抢占 Chrome 前台窗口）；若新绑定使用的是 Chrome 商店最新 `1.0.27` 扩展，需在 `xhs_bridge.py bind` 时显式传入 `--extension-version 1.0.27`：
 
 ```sh
 "$XHS_PY" scripts/xhs_bridge.py --project "$XHS_PROJECT" text-mode --binding "$XHS_BINDING" --mode background
 ```
+
+> **macOS 后台窗口遮挡说明**：详情页正文（`body`）与楼中楼深度评论（`roots`/`replies`）在完全后台/被遮挡的 Chrome 窗口中均可稳定快速采集；但搜索页瀑布流（`search`）依赖页面的 `requestAnimationFrame` 排版计算，若目标 Chrome 窗口被最小化或完全遮挡，守卫会主动报 `BACKGROUND_LAYOUT_UNSETTLED` 而不抢占系统焦点。大批量搜索排序切换时，建议保持该独立 Profile 的 Chrome 窗口处于未最小化且略微露出的状态（无需聚焦）。
 
 ## 运行模式 1：`api-async`（全自动高速异步流水线）
 

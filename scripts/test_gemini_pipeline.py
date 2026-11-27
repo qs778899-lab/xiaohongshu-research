@@ -382,6 +382,30 @@ class GeminiPipelineTests(unittest.TestCase):
         finally:
             db.close()
 
+    def test_pipeline_does_not_recollect_already_captured_body_task(self):
+        db = xp.Project(self.root / 'project')
+        try:
+            src_note = self.root / 'note1-body.json'
+            src_note.write_text(json.dumps({'url': URL1}))
+            m = self.root / 'body-only.json'
+            m.write_text(json.dumps({'units': [{'stage': 'body', 'target': NOTE1, 'sources': [str(src_note)], 'next': 'body'}]}))
+            body_tid = native.import_manifest(db, m)['task_ids'][0]
+            # Simulate a body task already captured and reviewed once, still pending due to a noted gap.
+            stored = bridge.store_capture(db, db.task(body_tid), {
+                'url': URL1, 'title': 't', 'body': 'b', 'authors': [], 'media': [], 'visible': True,
+            })
+            h = Path(stored['snapshot']).stem
+            task = db.task(body_tid)
+            task['payload']['bridge']['reviewed_hashes'] = [h]
+            task['payload']['bridge']['awaiting_review'] = False
+            db.db.execute('UPDATE tasks SET payload=? WHERE id=?', (xp.dumps(task['payload']), body_tid))
+            db.db.commit()
+            picked, _ = gp._pick_next_collect_task(db, self.binding, round_id=None, include_media=False, active_note=NOTE1)
+            self.assertIsNotNone(picked)
+            self.assertNotEqual(picked['id'], body_tid)
+        finally:
+            db.close()
+
 
 if __name__ == '__main__':
     unittest.main()

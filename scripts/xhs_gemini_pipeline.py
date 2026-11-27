@@ -522,6 +522,8 @@ def _pick_next_collect_task(db: xp.Project, binding: dict, *, round_id: str | No
             continue
         if pr.get('awaiting_review') and not repair:
             continue
+        if stage == 'body' and pr.get('hashes') and not (repair or vis_repair):
+            continue
         if reply_scope and pr.get('discovered_reply_gap'):
             continue
         if stage == 'replies':

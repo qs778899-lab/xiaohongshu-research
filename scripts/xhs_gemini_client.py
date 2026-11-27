@@ -560,7 +560,9 @@ class GeminiClient:
             f'Research goal: {research_goal}\n'
             'Read this Xiaohongshu note body carefully. Extract concise summary, relevance, '
             'whether its comment section should be collected, commercial/ad signals, verbatim grounded '
-            'quotes with strict attribution, observed aliases, and observed 24-hex public author UIDs only.\n'
+            'quotes with strict attribution, observed aliases, and observed 24-hex public author UIDs only. '
+            'Put ONLY stage-local body-text gaps (e.g. truncated or unreadable body) in gaps; leave gaps '
+            'empty when the full body text was read cleanly (images and comments are tracked in separate stages).\n'
             + wrap_untrusted(payload)
         )
         parsed, meta = self.generate_json(model, [{'text': prompt}], BODY_REVIEW_SCHEMA)
@@ -605,7 +607,8 @@ class GeminiClient:
             'Review EVERY comment entity below using parent_context and reply_target_context. '
             'List ALL reviewed entity_id values in reviewed_entity_ids. Every quote in findings MUST be '
             'an exact verbatim substring of that entity text. Do not inherit post-author attribution '
-            'onto commenters without textual support.\n'
+            'onto commenters without textual support. Put ONLY stage-local comment-text gaps in gaps; '
+            'leave gaps empty when all comment texts in this packet were read cleanly.\n'
             + wrap_untrusted({'items': compact})
         )
         parsed, meta = self.generate_json(model, [{'text': prompt}], COMMENT_PACKET_SCHEMA)

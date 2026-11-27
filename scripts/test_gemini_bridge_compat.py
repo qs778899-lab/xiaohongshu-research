@@ -286,6 +286,50 @@ class GeminiBridgeCompatTests(unittest.TestCase):
         native.record(self.project, tid2, rf)
         self.assertEqual(self.project.task(tid2)['status'], 'complete')
 
+    def test_bind_supports_explicit_verified_extension_version_1_0_27(self):
+        class BindDriver:
+            def call(self, action, binding=None, role=None, **fields):
+                if action == 'doctor':
+                    return {'version': '2.0.2'}
+                if action == 'profiles':
+                    return {'daemonRunning': True, 'profiles': [{'contextId': 'ctx-new', 'extensionVersion': '1.0.27'}]}
+                if action == 'create':
+                    return {'page': 'C' * 32 if role == 'search' else 'D' * 32, 'owned': True}
+                if action == 'metadata':
+                    return {'page': binding['tabs'][role]['page'], 'url': 'https://www.xiaohongshu.com/explore', 'windowId': 9}
+                if action == 'identity':
+                    return {'uid': UID, 'url': 'https://www.xiaohongshu.com/explore', 'visible': True}
+                raise AssertionError(action)
+
+        rt = {'package_root': 'pinned', 'node': 'node', 'config_dir': 'cfg', 'cache_dir': 'cache'}
+        with patch.object(b, 'Driver', return_value=BindDriver()):
+            # Default bind without explicit 1.0.27 still fails closed.
+            with self.assertRaisesRegex(b.BridgeError, 'EXTENSION_CHANGED_RECHECK_REQUIRED'):
+                b.bind(self.project.path, 'v26only', rt, 'ctx-new', 'newp', UID, 'b' * 64, 'auth')
+            res = b.bind(self.project.path, 'v27ok', rt, 'ctx-new', 'newp', UID, 'b' * 64, 'auth', extension_version='1.0.27')
+        self.assertEqual(res['state'], 'ready')
+        saved = b.load_binding(self.project.path, 'v27ok')
+        self.assertEqual(saved['extension_version'], '1.0.27')
+
+    def test_fast_mode_ready_capture_uses_extended_masonry_settle_retries(self):
+        calls = []
+
+        class MasonryDriver:
+            def call(self, action, binding=None, role=None, **fields):
+                calls.append(action)
+                if action == 'capture' and len(calls) < 5:
+                    raise b.BridgeError('BACKGROUND_LAYOUT_UNSETTLED')
+                return {'url': URL1, 'cards': [], 'selected': ['综合'], 'position': {'scrollTop': 0}, 'visible': False}
+
+        sleeps = []
+        with patch.object(b.time, 'sleep', side_effect=sleeps.append):
+            data = b.ready_capture(self.project, self.binding, MasonryDriver(), 'search',
+                                   {'stage': 'search', 'expectedPath': '/search_result', 'backgroundText': True},
+                                   fast_mode=True)
+        self.assertEqual(calls, ['capture'] * 5)
+        self.assertEqual(sleeps, [0.8, 0.8, 0.8, 0.8])
+        self.assertEqual(data['url'], URL1)
+
 
 if __name__ == '__main__':
     unittest.main()
