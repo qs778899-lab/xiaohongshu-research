@@ -142,3 +142,15 @@ xhs_project_tab.py --project P --parent-project SOURCE --binding CURRENT_PARENT 
 `/search_result_ai` 仅在精确公开域、单个非空 `keyword` 下可做身份核对与搜索检查；传统搜索与新版搜索不互相冒充相同目标。双重编码的关键词保留原 URL 和实际参数，不重写为推测查询。恢复仍须真实卡片、正常正文、人工审读和新凭据；AI 生成总结不能替代笔记卡片或患者原文，也不能据此确认排序或末尾。若新版页面缺少可核对的真实卡片，保留布局/内容缺口。
 
 标题非空、正文明确为空的图片型笔记，在同账号、精确正文页、有效公开作者和实际笔记图片来源均可核对时，可作为正常页面核验；图片和评论仍保持未读。只有表情资产、加载占位、无作者或异常提示不能通过。若首份捕获仅因此被拒，`finish-note` 可离线复核同一次导航和冻结原文，不重开另一帖、不重试采集；此接续仍需 Codex 实际审读标题、作者及空正文，并完成 `attest`。这份健康检查不证明图片内容或疗效。
+
+### 初始首页在身份绑定前确证丢失
+
+仅当专项首页已明确创建、首次绑定因 `USER_TAB_NOT_FOCUSED` 失败，普通 `finish-inspection` 随后归档了精确原标签不存在错误，且尚无身份、搜索或正文进度时，可接续原准备：
+
+```text
+xhs_project_tab.py --project P --parent-project SOURCE --binding CURRENT_PARENT --authorization "已有自主恢复授权" --replace-missing-before-binding ORIGINAL_ATTEMPT --absence-error ARCHIVED_EXACT_ABSENCE_ERROR
+```
+
+入口核对原创建、消费和失败链，先验证当前父账号、原窗口和未变化的 STOP，再只读探测原精确标签确实不存在。探测不会创建或选择页面。只有明确不存在才创建一次替代首页；在此之前已登记账号及项目的不可变消费记录。原标签仍在、未知错误、创建结果不明或替代再次丢失均不再建页，不通过换项目重试。
+
+替代首页仍须完成 `inspect`、真实搜索、正常正文和实际审读／`attest`。若仅新首页焦点失败，沿原 `finish-inspection` 接续同一个替代；本入口再次调用只收尾已完成的检查，不重放创建。已有身份或搜索进度、验证码和新的 STOP 不适用此分支。

@@ -128,7 +128,11 @@ def archived_probe(probe_ref):
     return probe, attempt, capture
 
 
-def create_home(parent, meta):
+def probe_prebind_absence(parent, meta, target):
+    return create_home(parent, meta, missing_target=target)
+
+
+def create_home(parent, meta, missing_target=None):
     # Driver construction verifies the pinned runtime before this entry is used.
     runtime = parent['runtime']
     env = {k:v for k,v in os.environ.items() if not k.startswith('OPENCLI_')}
@@ -137,6 +141,8 @@ def create_home(parent, meta):
            'extensionVersion':bridge.effective_extension_version(parent),
            'chromeTabId':parent['tabs']['detail']['chrome_tab_id'],
            'windowId':parent['tabs']['detail']['window_id'], 'expectedUrl':meta['url']}
+    if missing_target is not None:
+        cfg.update(action='probe_missing_prebind',missingTabId=missing_target['tabId'])
     try:
         result = subprocess.run([runtime['node'],str(Path(__file__).with_suffix('.mjs'))],
             input=json.dumps(cfg),text=True,capture_output=True,env=env,timeout=45)
@@ -217,9 +223,14 @@ def completed_preparation(record, keys, historical_only=False):
     done = record.with_suffix('.done.json')
     nr.require(done.exists(), 'PROJECT_TAB_PRIOR_OUTCOME_REQUIRES_DIAGNOSIS')
     result, _ = nr.read_json(done)
-    inspected = manual.check_pointer(result['inspection'])
+    if result.get('prebind_replacement'):
+        inspected, checked = prebind_replacement_inspection(result['prebind_replacement']['file'],result['inspection'])
+        nr.require(checked==record and result['prebind_replacement']==manual.pointer(result['prebind_replacement']['file']),
+                   'PROJECT_TAB_PREBIND_REPLACEMENT_CHANGED')
+    else:
+        inspected = manual.check_pointer(result['inspection'])
     grant_file = Path(result['inspection']['file']).parent / 'grant.json'
-    if not grant_file.exists() and record.with_suffix('.replacement.json').exists():
+    if not grant_file.exists() and record.with_suffix('.replacement.json').exists() and not result.get('prebind_replacement'):
         marker,_=nr.read_json(record.with_suffix('.replacement.json'))
         replacement=manual.check_pointer(marker['intent'])
         nr.require(replacement.get('inspection')==result['inspection'], 'PROJECT_TAB_REPLACEMENT_CHANGED')
@@ -495,16 +506,220 @@ def replace_missing_presearch_home(project, parent_project, binding, authorizati
     return dict(result, replacement_home=True, fresh_search_and_body_required=True)
 
 
+def missing_prebind_archive(project, attempt_file, absence_error_file):
+    """Validate a known-created home lost before adoption; no browser calls."""
+    project=Path(project).resolve();attempt_file=Path(attempt_file).resolve();root=attempt_file.parent
+    nr.require(root.parent==project/'bridge/manual-tab-recoveries' and attempt_file.name=='attempt.json',
+               'PROJECT_TAB_PREBIND_ATTEMPT_CHANGED')
+    attempt=manual.check_pointer(manual.pointer(attempt_file));parent=manual.check_pointer(attempt['parent'])
+    user=manual.check_pointer(attempt['user']);metadata=manual.check_pointer(attempt['metadata'])
+    target=manual.active_metadata(metadata)
+    nr.require(attempt.get('kind')==manual.KIND and attempt['project']==str(project)
+               and attempt['target']==target and target['url']==HOME and target['active'] is True
+               and attempt['args']==manual.proof_args(HOME), 'PROJECT_TAB_PREBIND_HOME_REQUIRED')
+    key=xp.digest({'stops':attempt['stops'],'context':parent['context_id'],'tabId':target['tabId']})
+    nr.require(root.name==key,'MANUAL_ATTEMPT_LOCATION_CHANGED')
+    reserved=xp.legacy.account_root()/'manual-tab-attempts'/(key+'.json')
+    nr.require(attempt['account_attempt']==manual.pointer(reserved),'MANUAL_RESERVATION_LOCATION_CHANGED')
+    reservation=manual.check_pointer(attempt['account_attempt'])
+    nr.require(reservation.get('kind')=='manual_tab_attempt_reservation_v1'
+               and reservation.get('project')==str(project) and reservation.get('parent_project')==attempt['parent_project']
+               and reservation.get('context_id')==parent['context_id'] and reservation.get('tab_id')==target['tabId']
+               and reservation.get('stops')==attempt['stops'], 'MANUAL_ATTEMPT_CHANGED')
+    slot={'session':'xhs-manual-'+key[:24],'owned':False,'state':'user_bound',
+          'window_id':target['windowId'],'chrome_tab_id':target['tabId'],'last_url':HOME}
+    expected={k:parent[k] for k in ('format','profile_label','context_id','account_uid','profile_guard_key','runtime')}
+    expected.update(project=str(project),binding_name='manual-'+key[:24],session=slot['session'],
+                    extension_version=bridge.effective_extension_version(parent),authorization=user['user_statement'],
+                    transport_surface='browser',manual_single_tab=True,tabs={'search':slot,'detail':slot},
+                    state='probe_only',background_text_collection=True)
+    nr.require(attempt['candidate']==expected,'MANUAL_CANDIDATE_CHANGED')
+    forbidden=('adopted.json','identity.json','loaded-page.json','inspection.json','grant.json',
+               'search-attempt.json','search-before.json','note-attempt.json','verified-focus-attempt.json')
+    nr.require(not any((root/n).exists() for n in forbidden)
+               and not list(root.glob('search-*.json')) and not list(root.glob('note-*.json')),
+               'PROJECT_TAB_PREBIND_MAY_HAVE_PROGRESS')
+    first=manual.check_pointer(manual.pointer(root/'inspection-failure.json'))
+    finish=manual.check_pointer(manual.pointer(root/'finish-inspection-attempt.json'))
+    failure=manual.check_pointer(manual.pointer(root/'finish-inspection-failure.json'))
+    error=manual.check_pointer(manual.pointer(absence_error_file))
+    nr.require(first.get('error')=='USER_TAB_NOT_FOCUSED' and first.get('collection_permitted') is False
+               and finish.get('attempt')==manual.pointer(attempt_file)
+               and finish.get('failure')==manual.pointer(root/'inspection-failure.json')
+               and finish.get('previous') is None and finish.get('focus_metadata') is None
+               and failure.get('error')=='CONNECTOR_ERROR' and failure.get('collection_permitted') is False,
+               'PROJECT_TAB_PREBIND_EXACT_FAILURE_REQUIRED')
+    nr.require(error.get('action')=='adopt_user_tab' and error.get('role') is None
+               and error.get('error')=={'code':'CONNECTOR_ERROR',
+                    'detail':'chrome.tabs.get: No tab with id: '+str(target['tabId'])+'.'}
+               and nr.stamp(first['at'])<=nr.stamp(finish['at'])<=nr.stamp(error['at'])<=nr.stamp(failure['at']),
+               'PROJECT_TAB_PREBIND_EXACT_ABSENCE_REQUIRED')
+    for ref in attempt['frozen_stops'].values():manual.check_pointer(ref)
+    nr.require(all(nr.stamp(user['processed_at'])>nr.stamp(v['at']) for v in attempt['stops'].values()),
+               'MANUAL_CONFIRMATION_PREDATES_STOP')
+    prep=manual.check_pointer(user['preparation']);folder=Path(user['preparation']['file']).parent
+    nr.require(Path(user['preparation']['file']).name=='intent.json'
+               and (folder==project/'bridge/project-tab-preparation' or folder.parent==project/'bridge/project-tab-renewals'),
+               'PROJECT_TAB_ORIGINAL_PREPARATION_REQUIRED')
+    nr.require(prep['project']==str(project) and prep['parent_project']==attempt['parent_project']
+               and prep['stops']==attempt['stops'] and manual.check_pointer(prep['parent'])==parent
+               and prep['authorization']==user['user_statement'] and prep['context_id']==parent['context_id']
+               and prep['account_uid']==parent['account_uid'], 'PROJECT_TAB_PREPARATION_CHANGED')
+    nr.require(nr.read_json(folder/'created.json')[0]==target,'PROJECT_TAB_PREPARATION_CHANGED')
+    identity=manual.check_pointer(prep['identity'])
+    nr.require(identity.get('uid')==parent['account_uid']
+               and identity.get('page')==parent['tabs']['detail']['page'], 'PROJECT_TAB_PARENT_CHANGED')
+    bridge.safe_url(identity['url'])
+    record_key={'context':parent['context_id'],'project':str(project)}
+    if prep.get('renewal'):record_key['renewal']=prep['renewal']
+    record=xp.legacy.account_root()/'project-tab-preparations'/(xp.digest(record_key)+'.json')
+    nr.require(nr.read_json(record)[0]==prep,'PROJECT_TAB_PREPARATION_CHANGED')
+    return attempt,parent,record,folder
+
+
+def prebind_replacement_inspection(intent_file, inspection_ref):
+    """Read the replacement home proof without creating or adopting a tab."""
+    intent=manual.check_pointer(manual.pointer(intent_file));project=Path(intent['project'])
+    attempt,parent,record,original_folder=missing_prebind_archive(project,intent['attempt']['file'],intent['absence_error']['file'])
+    nr.require(intent.get('kind')=='project_tab_prebind_replacement_v1'
+               and intent['attempt']==manual.pointer(intent['attempt']['file'])
+               and intent['absence_error']==manual.pointer(intent['absence_error']['file'])
+               and intent['original_record']==manual.pointer(record) and intent['stops']==attempt['stops']
+               and Path(intent_file)==original_folder/'prebind-home-replacement/intent.json',
+               'PROJECT_TAB_PREBIND_REPLACEMENT_CHANGED')
+    marker=nr.read_json(record.with_suffix('.replacement.json'))[0]
+    nr.require(marker=={'kind':intent['kind'],'intent':manual.pointer(intent_file)},'PROJECT_TAB_PREBIND_REPLACEMENT_CHANGED')
+    inspected=manual.check_pointer(inspection_ref);fresh=manual.check_pointer(inspected['attempt'])
+    created=nr.read_json(Path(intent_file).parent/'created.json')[0]
+    fresh_user=manual.check_pointer(fresh['user']);fresh_parent=manual.check_pointer(fresh['parent'])
+    nr.require(fresh_user.get('prebind_absence')==manual.pointer(Path(intent_file).parent/'absence.json')
+               and manual.check_pointer(fresh_user['prebind_absence'])=={
+                    'state':'native_target_absent','tabId':attempt['target']['tabId'],
+                    'windowId':attempt['target']['windowId']}, 'PROJECT_TAB_PREBIND_EXACT_ABSENCE_REQUIRED')
+    nr.require(inspected.get('kind')==manual.KIND and inspected.get('collection_permitted') is False
+               and fresh['project']==str(project) and fresh['parent_project']==attempt['parent_project']
+               and fresh['target']==created and fresh['args']==manual.proof_args(HOME)
+               and fresh['stops']==attempt['stops'] and fresh_parent==manual.check_pointer(intent['parent'])
+               and fresh_user.get('prebind_replacement')==manual.pointer(intent_file)
+               and created.get('url')==HOME and created.get('active') is True
+               and created.get('windowId')==attempt['target']['windowId']
+               and type(created.get('tabId')) is int
+               and created['tabId'] not in {attempt['target']['tabId'],fresh_parent['tabs']['detail']['chrome_tab_id']},
+               'PROJECT_TAB_PREBIND_REPLACEMENT_CHANGED')
+    fresh_key=xp.digest({'stops':fresh['stops'],'context':fresh_parent['context_id'],'tabId':created['tabId']})
+    expected=project/'bridge/manual-tab-recoveries'/fresh_key/'inspection.json'
+    nr.require(inspection_ref==manual.pointer(expected),'PROJECT_TAB_PREBIND_REPLACEMENT_CHANGED')
+    manual.require_capture(manual.check_pointer(inspected['capture']),inspected['binding'],manual.proof_args(HOME))
+    return inspected,record
+
+
+def finish_prebind_replacement(intent_file):
+    """Finish only an already-created and inspected replacement; never replay."""
+    intent=manual.check_pointer(manual.pointer(intent_file));folder=Path(intent_file).parent
+    created=nr.read_json(folder/'created.json')[0];parent=manual.check_pointer(intent['parent'])
+    key=xp.digest({'stops':intent['stops'],'context':parent['context_id'],'tabId':created['tabId']})
+    inspection=Path(intent['project'])/'bridge/manual-tab-recoveries'/key/'inspection.json'
+    inspected,record=prebind_replacement_inspection(intent_file,manual.pointer(inspection))
+    result={'inspection':manual.pointer(inspection),'prebind_replacement':manual.pointer(intent_file),
+            'collection_permitted':False}
+    done=record.with_suffix('.done.json')
+    if done.exists():nr.require(nr.read_json(done)[0]==result,'PROJECT_TAB_PREBIND_REPLACEMENT_CHANGED')
+    else:manual.evidence(done,result)
+    return {'inspection':str(inspection),'capture':inspected['capture'],'collection_permitted':False,
+            'replacement_home':True,'fresh_search_and_body_required':True}
+
+
+def replace_missing_prebind_home(project,parent_project,binding,authorization,attempt_file,absence_error_file,
+                                 creator=create_home,prober=probe_prebind_absence):
+    """One replacement for a proven missing home before its first binding."""
+    project=Path(project).resolve();parent_project=Path(parent_project).resolve();xp.legacy.research_path(project)
+    nr.require(project!=parent_project,'DISTINCT_PROJECT_REQUIRED')
+    nr.require(isinstance(authorization,str) and authorization.strip(),'AUTHORIZATION_BASIS_REQUIRED')
+    attempt,old_parent,record,original_folder=missing_prebind_archive(project,attempt_file,absence_error_file)
+    folder=original_folder/'prebind-home-replacement';marker=record.with_suffix('.replacement.json')
+    if marker.exists():
+        saved=nr.read_json(marker)[0]
+        nr.require(saved=={'kind':'project_tab_prebind_replacement_v1','intent':manual.pointer(folder/'intent.json')},
+                   'PROJECT_TAB_REPLACEMENT_ALREADY_ATTEMPTED')
+        return finish_prebind_replacement(folder/'intent.json')
+    nr.require(not (folder/'intent.json').exists() and not record.with_suffix('.done.json').exists(),
+               'PROJECT_TAB_REPLACEMENT_ALREADY_ATTEMPTED')
+    parent=bridge.load_binding(parent_project,binding)
+    nr.require(str(parent_project)==attempt['parent_project'],'PROJECT_TAB_PARENT_CHANGED')
+    for f in ('context_id','account_uid','profile_guard_key','profile_label','runtime'):
+        nr.require(parent.get(f)==old_parent.get(f),'PROJECT_TAB_PARENT_CHANGED')
+    with bridge.lease(parent_project,parent) as keys:
+        nr.require(nr.current_stops(keys)==attempt['stops'],'PROJECT_TAB_STOP_CHANGED')
+        for old in record.parent.glob('*.json'):
+            if old==record or old.name.endswith(('.done.json','.replacement.json')):continue
+            value=nr.read_json(old)[0];prior=manual.check_pointer(value['parent'])
+            if value.get('context_id')==parent['context_id'] or prior.get('account_uid')==parent['account_uid']:
+                completed_preparation(old,keys,historical_only=True)
+        driver=bridge.Driver(parent['runtime'])
+        try:
+            meta=driver.call('metadata',parent,'detail');ident=driver.call('identity',parent,'detail');slot=parent['tabs']['detail']
+            nr.require(meta.get('page')==slot['page']==ident.get('page') and ident.get('uid')==parent['account_uid']
+                       and ident.get('url')==meta.get('url') and slot.get('window_id')==attempt['target']['windowId'],
+                       'PROJECT_TAB_PARENT_CHANGED')
+            bridge.safe_url(meta['url']);nr.require(nr.current_stops(keys)==attempt['stops'],'PROJECT_TAB_STOP_CHANGED')
+            folder.mkdir(parents=True,exist_ok=True)
+            intent={'kind':'project_tab_prebind_replacement_v1','at':xp.legacy.now(),'project':str(project),
+                    'attempt':manual.pointer(attempt_file),'absence_error':manual.pointer(absence_error_file),
+                    'original_record':manual.pointer(record),'stops':attempt['stops'],'authorization':authorization,
+                    'parent':manual.evidence(folder/'parent.json',parent),'parent_identity':ident}
+            manual.evidence(folder/'intent.json',intent)
+            manual.evidence(marker,{'kind':intent['kind'],'intent':manual.pointer(folder/'intent.json')})
+            absent=prober(parent,meta,attempt['target']);manual.evidence(folder/'absence.json',absent)
+            nr.require(absent=={'state':'native_target_absent','tabId':attempt['target']['tabId'],
+                       'windowId':attempt['target']['windowId']},'PROJECT_TAB_PREBIND_EXACT_ABSENCE_REQUIRED')
+            created=creator(parent,meta);manual.evidence(folder/'created.json',created)
+            nr.require(created.get('url')==HOME and created.get('active') is True
+                       and type(created.get('tabId')) is int
+                       and created['tabId'] not in {slot['chrome_tab_id'],attempt['target']['tabId']}
+                       and created.get('windowId')==slot['window_id'],'PROJECT_TAB_CREATE_MISMATCH')
+            nr.require(nr.current_stops(keys)==attempt['stops'],'PROJECT_TAB_STOP_CHANGED')
+            nr.require(bridge.load_binding(parent_project,binding)==parent,'PROJECT_TAB_PARENT_CHANGED')
+            user={'user_statement':authorization,'processed_at':xp.legacy.now(),
+                  'normal_other_posts_statement':'Current same-account parent identity was actually verified; replacement still needs search and note review.',
+                  'statement_origin':'automated_observation_not_user_restoration_claim',
+                  'prebind_replacement':manual.pointer(folder/'intent.json'),
+                  'prebind_absence':manual.pointer(folder/'absence.json')}
+            manual.evidence(folder/'request.json',user)
+        except bridge.BridgeError as exc:
+            if exc.code=='ACCESS_STOP':bridge.identity.stop_all(keys,'Observed browser login/verification/access restriction')
+            raise
+        finally:driver.close()
+    try:manual.inspect(project,binding,folder/'created.json',folder/'request.json',parent_project)
+    except bridge.BridgeError as exc:
+        if exc.code=='ACCESS_STOP':
+            with nr.locked_stops(parent['profile_guard_key'],parent['account_uid']) as keys:
+                bridge.identity.stop_all(keys,'Observed browser login/verification/access restriction')
+        raise
+    return finish_prebind_replacement(folder/'intent.json')
+
+
 def main():
     p=argparse.ArgumentParser(description=__doc__)
     p.add_argument('--project',type=Path,required=True);p.add_argument('--parent-project',type=Path,required=True)
     p.add_argument('--binding',required=True);p.add_argument('--authorization',required=True)
     p.add_argument('--renew-from-inspection',type=Path,
                    help='Completed archived home inspection of this destination; current parent access remains required.')
+    p.add_argument('--replace-missing-before-binding',type=Path,help='Original pre-bind attempt with exact absence proof; one replacement only.')
+    p.add_argument('--absence-error',type=Path,help='Archived exact native missing-tab failure from the original adoption continuation.')
     p.add_argument('--replace-missing-before-search',type=Path,
                    help='Original completed home inspection whose first search metadata failed with exact target absence.')
     a=p.parse_args()
-    if a.replace_missing_before_search:
+    nr.require(sum(bool(v) for v in (a.renew_from_inspection,a.replace_missing_before_binding,a.replace_missing_before_search))<=1,
+               'PROJECT_TAB_REPLACEMENT_MODE_CONFLICT')
+    nr.require(a.absence_error is None or a.replace_missing_before_binding is not None,
+               'PROJECT_TAB_REPLACEMENT_MODE_CONFLICT')
+    if a.replace_missing_before_binding:
+        nr.require(not a.renew_from_inspection and not a.replace_missing_before_search,
+                   'PROJECT_TAB_REPLACEMENT_MODE_CONFLICT')
+        nr.require(a.absence_error is not None,'PROJECT_TAB_PREBIND_EXACT_FAILURE_REQUIRED')
+        result=replace_missing_prebind_home(a.project,a.parent_project,a.binding,a.authorization,a.replace_missing_before_binding,a.absence_error)
+        print(json.dumps(result,ensure_ascii=False));return
+    elif a.replace_missing_before_search:
         nr.require(not a.renew_from_inspection, 'PROJECT_TAB_REPLACEMENT_MODE_CONFLICT')
         result=replace_missing_presearch_home(a.project,a.parent_project,a.binding,a.authorization,a.replace_missing_before_search)
         print(json.dumps(result,ensure_ascii=False));return
