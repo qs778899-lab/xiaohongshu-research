@@ -53,11 +53,12 @@ def check(root=ROOT, staged=False, history=False):
     errors = []
     checked = 0
     seen = set()
-    def scan(label, entries, read):
+    def scan(label, entries, read, permitted=None):
         nonlocal checked
+        permitted = allowed if permitted is None else permitted
         for mode, oid, name in entries:
-            if name not in allowed:
-                errors.append((label, name, 'not_in_public_inventory')); continue
+            if name not in permitted:
+                errors.append((label, name, 'not_in_public_inventory'))
             if mode not in ('100644', '100755'):
                 errors.append((label, name, 'non_regular_file')); continue
             if oid and oid in seen: continue
@@ -89,7 +90,23 @@ def check(root=ROOT, staged=False, history=False):
                 if not row: continue
                 meta, name = row.split(b'\t', 1); mode, kind, oid = meta.decode().split()
                 entries.append((mode, oid, name.decode()))
-            scan(commit[:12], entries, lambda oid, name: git(root, 'cat-file', 'blob', oid))
+            # Branches may have different explicit inventories. An invalid or missing
+            # historical inventory still blocks; it must never grant extra paths.
+            version_allowed = set()
+            manifest_rows = [entry for entry in entries if entry[2] == MANIFEST]
+            if not manifest_rows:
+                errors.append((commit[:12], MANIFEST, 'history_inventory_missing'))
+            elif manifest_rows[0][0] not in ('100644', '100755'):
+                errors.append((commit[:12], MANIFEST, 'history_inventory_non_regular'))
+            else:
+                try:
+                    version_allowed = inventory(git(root, 'cat-file', 'blob', manifest_rows[0][1]).decode('utf-8'))
+                except (ValueError, subprocess.CalledProcessError):
+                    errors.append((commit[:12], MANIFEST, 'history_inventory_invalid'))
+            # Preserve the existing current-inventory allowance for old public paths.
+            # Do not take a union of inventories from other commits or branches.
+            scan(commit[:12], entries, lambda oid, name: git(root, 'cat-file', 'blob', oid),
+                 allowed | version_allowed)
             # Identity is intentionally inherited from existing Git config; scan commit messages only.
             errors.extend((commit[:12], '<commit-message>', x) for x in content_findings(git(root, 'show', '-s', '--format=%B', commit), forbidden))
         for tag in git(root, 'for-each-ref', '--format=%(refname)', 'refs/tags').decode().splitlines():
