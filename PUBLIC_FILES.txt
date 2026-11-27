@@ -203,3 +203,5 @@ scripts/test_bridge_fast_mode.mjs
 scripts/test_gemini_bridge_compat.py
 scripts/xhs_gemini_client.py
 scripts/test_gemini_client.py
+scripts/xhs_gemini_pipeline.py
+scripts/test_gemini_pipeline.py
