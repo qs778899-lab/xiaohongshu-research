@@ -1156,8 +1156,21 @@ export async function publicReplyDom(opts) {
     }
     return null;
   };
+  const isComposerActive = composer => {
+    if (!composer) return false;
+    const bar = composer.closest?.('.engage-bar');
+    if (bar) {
+      const inactiveCover = bar.querySelector?.('.not-active, .inner-when-not-active');
+      if (inactiveCover && visible(inactiveCover)) return false;
+      const cls = String(bar.className || '').split(/\s+/);
+      if (cls.includes('engage-bar') && !cls.includes('active')) return false;
+    }
+    return true;
+  };
   const findTrigger = () => {
     const selectors = [
+      '.engage-bar-container .not-active.inner-when-not-active',
+      '.engage-bar-container .not-active',
       '.engage-bar-container .input-box',
       '.engage-bar .input-box',
       '.interact-container .input-box',
@@ -1174,7 +1187,10 @@ export async function publicReplyDom(opts) {
     return spans.find(e => !spans.some(c => c !== e && e.contains(c))) || null;
   };
   const findReplyControl = item => {
-    const candidates = [...item.querySelectorAll('.interactions .reply, .reply.icon-container, .reply-icon, .interactions [class*="reply"], button, [role="button"], span, div')]
+    const exact = [...item.querySelectorAll('.interactions .reply.icon-container, .interactions .reply, .reply.icon-container')]
+      .find(el => visible(el) && el.closest?.('.comment-item, .comment-item-sub') === item);
+    if (exact) return exact;
+    const candidates = [...item.querySelectorAll('.interactions [class*="reply"], button, [role="button"], span, div')]
       .filter(el => {
         if (!visible(el)) return false;
         if (el.tagName === 'A' || el.getAttribute?.('href') || el.closest?.('a[href], .author-wrapper, .like, .like-wrapper, .follow')) return false;
@@ -1218,12 +1234,12 @@ export async function publicReplyDom(opts) {
       }
     }
     const box = composer?.closest?.('.comment-comp, .engage-bar-container, .engage-bar, .bottom-area, .input-box') || scope;
-    for (const sel of ['.reply-info', '.reply-target', '.reply-user', '.reply-to', '.active-reply', '.reply-banner', '.comment-reply-header', '.input-box .placeholder']) {
+    for (const sel of ['.reply-content .reply', '.reply-content', '.reply-info', '.reply-target', '.reply-user', '.reply-to', '.active-reply', '.reply-banner', '.comment-reply-header', '.input-box .placeholder']) {
       for (const el of box.querySelectorAll(sel)) {
         if (visible(el)) parts.push(String(el.innerText || el.textContent || '').trim());
       }
     }
-    return parts.filter(Boolean).join(' | ').slice(0, 300);
+    return [...new Set(parts.filter(Boolean))].join(' | ').slice(0, 300);
   };
   const readComposerText = composer => {
     if (!composer) return '';
@@ -1351,27 +1367,35 @@ export async function publicReplyDom(opts) {
   if (gaps.length > 0)
     return {...preflight, readOnly: false, gap: gaps[0], sendClicked: false};
 
-  // 1. Open/focus composer bound to exact destination.
+  // 1. Open/focus composer bound to exact destination and wait for active state.
   if (destination === 'reply_to_comment') {
     try { replyControl.scrollIntoView?.({block: 'center', inline: 'nearest', behavior: 'instant'}); } catch {}
     replyControl.click();
-  } else if (!composerNow && triggerNow) {
+  } else if ((!composerNow || !isComposerActive(composerNow)) && triggerNow) {
     try { triggerNow.scrollIntoView?.({block: 'center', inline: 'nearest', behavior: 'instant'}); } catch {}
     triggerNow.click();
   }
 
+  const expectedName = String(opts.recipientName || targetRow?.authorName || '').trim();
   let composer = null;
+  let hintAfterOpen = '';
   for (let i = 0; i < 15; i++) {
-    composer = findComposer();
-    if (composer) break;
+    const candidate = findComposer();
+    if (candidate && isComposerActive(candidate)) {
+      composer = candidate;
+      hintAfterOpen = composerReplyHint(composer);
+      if (destination !== 'reply_to_comment' || !expectedName ||
+          (hintAfterOpen && norm(hintAfterOpen).includes(norm(expectedName)))) {
+        break;
+      }
+    }
     await sleep(100);
   }
   if (!composer) return {...preflight, readOnly: false, gap: 'COMPOSER_DID_NOT_OPEN', sendClicked: false};
 
-  const hintAfterOpen = composerReplyHint(composer);
+  hintAfterOpen = composerReplyHint(composer);
   if (destination === 'reply_to_comment') {
-    const expectedName = String(opts.recipientName || targetRow?.authorName || '').trim();
-    if (expectedName && hintAfterOpen && !norm(hintAfterOpen).includes(norm(expectedName))) {
+    if (expectedName && (!hintAfterOpen || !norm(hintAfterOpen).includes(norm(expectedName)))) {
       return {...preflight, readOnly: false, gap: 'REPLY_TARGET_HINT_MISMATCH',
         observedHint: hintAfterOpen, expectedRecipientName: expectedName, sendClicked: false};
     }

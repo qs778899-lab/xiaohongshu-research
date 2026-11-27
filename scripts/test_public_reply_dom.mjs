@@ -242,4 +242,44 @@ let checks = 0;
   checks++;
 }
 
+// 5. Inactive engage-bar with mounted #content-textarea must require active banner before sending
+{
+  let submitClicks = 0;
+  const composer = makeNode('p', {attrs: {id: 'content-textarea', contenteditable: 'true'}, visible: true});
+  const inactiveCover = makeNode('div', {cls: 'not-active inner-when-not-active', text: '说点什么...', visible: true});
+  const submitBtn = makeNode('button', {cls: 'submit', text: '发送', visible: true, onClick: () => { submitClicks++; }});
+  const engageBar = makeNode('div', {cls: 'engage-bar', children: [composer, inactiveCover, submitBtn]});
+  const replyBtn = makeNode('div', {cls: 'reply icon-container', text: '回复', onClick: () => {
+    // Simulates reply click activating engage-bar WITHOUT setting reply-content banner
+    engageBar.className = 'engage-bar active';
+    inactiveCover.getClientRects = () => [];
+  }});
+  const authorLink = makeNode('a', {cls: 'name', attrs: {href: `/user/profile/${OTHER_UID}`}, text: 'Target Person'});
+  const rootItem = makeNode('div', {
+    cls: 'comment-item', attrs: {'data-comment-id': ROOT_CID},
+    children: [
+      makeNode('div', {cls: 'author-wrapper', children: [authorLink]}),
+      makeNode('div', {cls: 'content', text: 'Original'}),
+      makeNode('div', {cls: 'interactions', children: [replyBtn]}),
+    ],
+  });
+  const parent = makeNode('div', {cls: 'parent-comment', attrs: {'data-comment-id': ROOT_CID}, children: [rootItem]});
+  const doc = makeNode('body', {children: [makeNode('div', {cls: 'note-container', children: [
+    makeNode('div', {cls: 'comments-container', children: [parent]}),
+    makeNode('div', {cls: 'engage-bar-container', children: [engageBar]}),
+  ]})]});
+
+  const res = await runDom(doc, {
+    action: 'public_reply_submit', expectedPath: `/explore/${NOTE_ID}`, uid: OWN_UID,
+    destination: 'reply_to_comment', recipientUid: OTHER_UID, recipientName: 'Target Person',
+    recipientCommentId: ROOT_CID, rootCommentId: ROOT_CID,
+    message: 'Synthetic question?', execute: true, intentDigest: DIGEST,
+    postClickPollRounds: 1, postClickPollMs: 0,
+  });
+  assert.equal(res.sendClicked, false);
+  assert.equal(res.gap, 'REPLY_TARGET_HINT_MISMATCH');
+  assert.equal(submitClicks, 0);
+  checks++;
+}
+
 console.log(`PASS: guarded public reply DOM checks: ${checks}`);
