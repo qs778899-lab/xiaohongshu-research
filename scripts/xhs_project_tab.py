@@ -17,6 +17,51 @@ import xhs_project as xp
 HOME = 'https://www.xiaohongshu.com/explore'
 
 
+def historical_account_record(ref, expected):
+    """Read a consumed record at its original or registered migrated location.
+
+    This resolver is for immutable historical preparation validation only. It
+    does not refresh grants, change STOPs or permit a new browser operation.
+    """
+    import xhs_account_state as state
+    expected = Path(expected).absolute()
+    root = Path(xp.legacy.account_root()).absolute()
+    # Validate the lexical location before pointer() resolves paths. A symlink
+    # must never turn an old reference into an apparent exact-current match.
+    nr.require(not root.is_symlink() and root == root.resolve()
+               and expected.parent.parent == root
+               and expected.parent.name in {'project-tab-preparations', 'manual-tab-attempts'}
+               and expected.suffix == '.json' and expected.is_file()
+               and not expected.is_symlink() and not expected.parent.is_symlink(),
+               'PROJECT_TAB_MIGRATION_RECORD_CHANGED')
+    current = manual.pointer(expected)
+    if ref == current:
+        return manual.check_pointer(ref)
+    root = state.secure_directory(root)
+    manifest = root / 'state-migration.json'
+    nr.require(not manifest.is_symlink() and manifest.is_file(), 'PROJECT_TAB_MIGRATION_REQUIRED')
+    value, _ = nr.read_json(manifest)
+    nr.require(value.get('format') == 1 and value.get('destination') == str(root)
+               and value.get('collection_permitted') is False
+               and value.get('fresh_web_validation_required') is True
+               and value.get('source_unchanged') is True
+               and value.get('api_and_media_restrictions_preserved') is True,
+               'PROJECT_TAB_MIGRATION_CHANGED')
+    relative = expected.relative_to(root)
+    source = Path(value['source'])
+    nr.require(source.is_absolute() and source.resolve() != root
+               and Path(ref.get('file', '')).resolve() == (source / relative).resolve()
+               and not Path(ref['file']).is_symlink(), 'PROJECT_TAB_MIGRATION_SOURCE_CHANGED')
+    digest = current['sha256']
+    nr.require(ref.get('sha256') == digest
+               and value.get('files', {}).get(str(relative)) == digest
+               and value.get('source_files', {}).get(str(relative)) == digest,
+               'PROJECT_TAB_MIGRATION_RECORD_CHANGED')
+    # A still-present original must also retain the exact registered bytes.
+    if Path(ref['file']).exists(): manual.check_pointer(ref)
+    return manual.check_pointer(current)
+
+
 def archived_probe(probe_ref):
     """Validate durable history after a temporary reservation was removed.
 
@@ -27,13 +72,23 @@ def archived_probe(probe_ref):
     inspected = manual.check_pointer(probe['inspection'])
     attempt = manual.check_pointer(inspected['attempt'])
     reservation = attempt.get('account_attempt', {})
-    if not reservation or Path(reservation['file']).exists():
+    if not reservation:
         return manual.validated_probe(probe_ref)
     parent = manual.check_pointer(attempt['parent'])
     key = xp.digest({'stops': attempt['stops'], 'context': parent['context_id'],
                      'tabId': attempt['target']['tabId']})
     expected = xp.legacy.account_root() / 'manual-tab-attempts' / (key + '.json')
-    nr.require(Path(reservation['file']).resolve() == expected.resolve()
+    migrated = Path(reservation['file']).resolve() != expected.resolve()
+    if migrated:
+        reserved = historical_account_record(reservation, expected)
+        nr.require(reserved.get('project') == attempt['project']
+                   and reserved.get('parent_project') == attempt.get('parent_project', attempt['project'])
+                   and reserved.get('context_id') == parent['context_id']
+                   and reserved.get('tab_id') == attempt['target']['tabId']
+                   and reserved.get('stops') == attempt['stops'], 'MANUAL_ATTEMPT_RESERVATION_CHANGED')
+    elif Path(reservation['file']).exists():
+        return manual.validated_probe(probe_ref)
+    nr.require((migrated or Path(reservation['file']).resolve() == expected.resolve())
                and not Path(reservation['file']).is_symlink()
                and isinstance(reservation.get('sha256'), str)
                and len(reservation['sha256']) == 64
@@ -157,7 +212,7 @@ def renewal_archive(project, inspection_file, parent):
     return {'inspection': manual.pointer(inspection_file), 'grant': manual.pointer(grant_file)}
 
 
-def completed_preparation(record, keys):
+def completed_preparation(record, keys, historical_only=False):
     """Require an intact historical search, note and review for the old tab."""
     done = record.with_suffix('.done.json')
     nr.require(done.exists(), 'PROJECT_TAB_PRIOR_OUTCOME_REQUIRES_DIAGNOSIS')
@@ -167,10 +222,15 @@ def completed_preparation(record, keys):
     if not grant_file.exists() and record.with_suffix('.replacement.json').exists():
         marker,_=nr.read_json(record.with_suffix('.replacement.json'))
         replacement=manual.check_pointer(marker['intent'])
-        nr.require(replacement.get('inspection')==result['inspection']
-                   and replacement.get('original_record')==manual.pointer(record), 'PROJECT_TAB_REPLACEMENT_CHANGED')
-        _,attempt,_,checked_record,folder=missing_presearch_archive(inspected['binding']['project'],result['inspection']['file'])
-        nr.require(checked_record==record and replacement['stops']==attempt['stops']==nr.current_stops(keys),
+        nr.require(replacement.get('inspection')==result['inspection'], 'PROJECT_TAB_REPLACEMENT_CHANGED')
+        if historical_only:
+            historical_account_record(replacement.get('original_record', {}), record)
+        else:
+            nr.require(replacement.get('original_record')==manual.pointer(record), 'PROJECT_TAB_REPLACEMENT_CHANGED')
+        _,attempt,_,checked_record,folder=missing_presearch_archive(
+            inspected['binding']['project'],result['inspection']['file'],historical_only=historical_only)
+        nr.require(checked_record==record and replacement['stops']==attempt['stops']
+                   and (historical_only or replacement['stops']==nr.current_stops(keys)),
                    'PROJECT_TAB_REPLACEMENT_CHANGED')
         replacement_folder=folder/'presearch-home-replacement'
         nr.require(Path(marker['intent']['file'])==replacement_folder/'intent.json', 'PROJECT_TAB_REPLACEMENT_CHANGED')
@@ -187,7 +247,9 @@ def completed_preparation(record, keys):
     nr.require(b.get('manual_tab_revalidation') == manual.pointer(grant_file), 'PROJECT_TAB_GRANT_CHANGED')
     nr.require(b['tabs']['detail']['page'] == inspected['binding']['tabs']['detail']['page'],
                'PROJECT_TAB_ATTESTATION_TARGET_CHANGED')
-    probe = validate_historical_preparation(inspected['binding']['project'], b, grant, keys)
+    probe = (validate_preparation_archive(inspected['binding']['project'], b, grant,
+                allow_missing_temporary_reservation=True) if historical_only else
+             validate_historical_preparation(inspected['binding']['project'], b, grant, keys))
     search = manual.check_pointer(probe['inspection'])
     nr.require(search.get('initial_inspection') == result['inspection'], 'PROJECT_TAB_INSPECTION_CHANGED')
 
@@ -223,7 +285,7 @@ def prepare(project, parent_project, binding, authorization, creator=create_home
             prior_parent = manual.check_pointer(value['parent'])
             if (value.get('context_id')==parent['context_id']
                     or prior_parent.get('account_uid')==parent['account_uid']):
-                completed_preparation(old, keys)
+                completed_preparation(old, keys, historical_only=True)
         driver=bridge.Driver(parent['runtime'])
         try:
             meta=driver.call('metadata',parent,'detail')
@@ -271,7 +333,7 @@ def prepare(project, parent_project, binding, authorization, creator=create_home
     return dict(result,new_project_tab=True,fresh_search_and_body_required=True)
 
 
-def missing_presearch_archive(project, inspection_file):
+def missing_presearch_archive(project, inspection_file, historical_only=False):
     """Validate a completed home inspection whose first metadata read failed.
 
     No search action may have reached the page. This is not permission to
@@ -299,9 +361,12 @@ def missing_presearch_archive(project, inspection_file):
     key = xp.digest({'stops': attempt['stops'], 'context': parent['context_id'], 'tabId': target['tabId']})
     nr.require(root.name == key, 'MANUAL_ATTEMPT_LOCATION_CHANGED')
     reservation_file = xp.legacy.account_root() / 'manual-tab-attempts' / (key + '.json')
-    nr.require(Path(attempt['account_attempt']['file']).resolve() == reservation_file.resolve(),
-               'MANUAL_RESERVATION_LOCATION_CHANGED')
-    reservation = manual.check_pointer(attempt['account_attempt'])
+    if historical_only:
+        reservation = historical_account_record(attempt['account_attempt'], reservation_file)
+    else:
+        nr.require(Path(attempt['account_attempt']['file']).resolve() == reservation_file.resolve(),
+                   'MANUAL_RESERVATION_LOCATION_CHANGED')
+        reservation = manual.check_pointer(attempt['account_attempt'])
     nr.require(reservation.get('project') == str(project) and reservation.get('stops') == attempt['stops']
                and reservation.get('tab_id') == target['tabId']
                and reservation.get('context_id') == parent['context_id'], 'MANUAL_ATTEMPT_CHANGED')
@@ -375,7 +440,7 @@ def replace_missing_presearch_home(project, parent_project, binding, authorizati
             value, _ = nr.read_json(old)
             old_parent = manual.check_pointer(value['parent'])
             if value.get('context_id') == parent['context_id'] or old_parent.get('account_uid') == parent['account_uid']:
-                completed_preparation(old, keys)
+                completed_preparation(old, keys, historical_only=True)
         driver = bridge.Driver(parent['runtime'])
         try:
             missing = inspected['binding']

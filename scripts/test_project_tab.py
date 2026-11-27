@@ -414,4 +414,122 @@ class PresearchReplacementTests(unittest.TestCase):
   (root/'normal-note.json').write_text('{}')
   with patch.object(m.nr,'current_stops',return_value=f.stops),self.assertRaises(Exception):t.completed_preparation(record,['k'])
 
+
+
+
+class MigratedHistoricalRecordTests(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+  self.base=Path(self.tmp.name).resolve();self.old=self.base/'old-guard';self.new=self.base/'durable-guard'
+  self.old.mkdir(mode=0o700);self.new.mkdir(mode=0o700)
+  self.relative=Path('project-tab-preparations')/('a'*64+'.json')
+  self.source=self.old/self.relative;self.source.parent.mkdir();m.evidence(self.source,{'synthetic':'consumed-once'})
+  self.ref=m.pointer(self.source);self.target=self.new/self.relative;self.target.parent.mkdir();self.target.write_bytes(self.source.read_bytes())
+  self.report={'format':1,'source':str(self.old),'destination':str(self.new),'collection_permitted':False,
+    'fresh_web_validation_required':True,'source_unchanged':True,'api_and_media_restrictions_preserved':True,
+    'files':{str(self.relative):self.ref['sha256']},'source_files':{str(self.relative):self.ref['sha256']}}
+  self.manifest=self.new/'state-migration.json';self.write_manifest()
+  self.guard=patch.object(t.xp.legacy,'account_root',return_value=self.new);self.guard.start();self.addCleanup(self.guard.stop)
+ def write_manifest(self):self.manifest.write_text(json.dumps(self.report))
+ def check(self,ref=None):return t.historical_account_record(ref or self.ref,self.target)
+ def test_registered_copy_preserves_consumption_when_source_was_cleaned(self):
+  self.source.unlink();before=self.target.read_bytes();self.assertEqual(self.check(),{'synthetic':'consumed-once'});self.assertEqual(self.target.read_bytes(),before)
+ def test_exact_current_pointer_needs_no_migration(self):
+  self.manifest.unlink();self.assertEqual(self.check(m.pointer(self.target)),{'synthetic':'consumed-once'})
+ def test_arbitrary_old_path_is_rejected_even_with_identical_bytes(self):
+  other=self.base/'other.json';other.write_bytes(self.source.read_bytes())
+  with self.assertRaisesRegex(Exception,'MIGRATION_SOURCE_CHANGED'):self.check(m.pointer(other))
+ def test_changed_current_bytes_are_rejected(self):
+  self.target.write_text('{}')
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):self.check()
+ def test_still_present_but_changed_old_bytes_are_rejected(self):
+  self.source.write_text('{}')
+  with self.assertRaises(Exception):self.check()
+ def test_missing_original_hash_registration_is_rejected(self):
+  del self.report['source_files'][str(self.relative)];self.write_manifest()
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):self.check()
+ def test_missing_copy_hash_registration_is_rejected(self):
+  del self.report['files'][str(self.relative)];self.write_manifest()
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):self.check()
+ def test_malformed_manifest_and_changed_destination_are_rejected(self):
+  self.manifest.write_text('not-json')
+  with self.assertRaises(Exception):self.check()
+  self.report['destination']=str(self.old);self.write_manifest()
+  with self.assertRaisesRegex(Exception,'MIGRATION_CHANGED'):self.check()
+ def test_missing_manifest_is_not_an_implicit_migration(self):
+  self.manifest.unlink()
+  with self.assertRaisesRegex(Exception,'MIGRATION_REQUIRED'):self.check()
+ def test_symlinked_manifest_is_rejected(self):
+  actual=self.base/'actual-manifest.json';actual.write_bytes(self.manifest.read_bytes());self.manifest.unlink();self.manifest.symlink_to(actual)
+  with self.assertRaisesRegex(Exception,'MIGRATION_REQUIRED'):self.check()
+ def test_migration_cannot_claim_collection_permission(self):
+  self.report['collection_permitted']=True;self.write_manifest()
+  with self.assertRaisesRegex(Exception,'MIGRATION_CHANGED'):self.check()
+ def test_current_record_symlink_cannot_bypass_missing_manifest(self):
+  self.target.unlink();self.target.symlink_to(self.source);self.manifest.unlink()
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):self.check()
+ def test_current_record_symlink_cannot_bypass_manifest_validation(self):
+  self.target.unlink();self.target.symlink_to(self.source)
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):self.check()
+ def test_parent_directory_symlink_cannot_bypass_missing_manifest(self):
+  self.target.unlink();self.target.parent.rmdir();self.target.parent.symlink_to(self.source.parent,target_is_directory=True);self.manifest.unlink()
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):self.check()
+ def test_current_record_outside_account_root_is_rejected_before_exact_match(self):
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):
+   t.historical_account_record(self.ref,self.source)
+
+
+class MigratedCompletedReplacementTests(PresearchReplacementTests):
+ def completed_chain(self):
+  with self.mocks():r=self.run_replace()
+  f=self.fixture;initial=Path(r['inspection']);root=initial.parent;inspected=m.check_pointer(m.pointer(initial))
+  capture={'uid':f.uid,'url':'https://www.xiaohongshu.com/search_result?keyword=example&type=51',
+    'cards':[{'url':'https://www.xiaohongshu.com/explore/'+'3'*24,'text':'Synthetic diary'}]}
+  search=dict(inspected,initial_inspection=m.pointer(initial),capture=m.evidence(root/'actual-search.json',capture))
+  note={'uid':f.uid,'url':capture['cards'][0]['url'],'title':'Synthetic diary','body':'Synthetic treatment narrative.',
+    'authors':[{'name':'synthetic','url':'https://www.xiaohongshu.com/user/profile/'+'5'*24}]}
+  b=copy.deepcopy(inspected['binding']);b['tabs']['detail']['last_url']=note['url'];b['tabs']['search']=b['tabs']['detail']
+  probe={'kind':m.KIND,'binding':b,'inspection':m.evidence(root/'search-probe.json',search),
+    'capture':m.evidence(root/'normal-note.json',note),'excluded_note_id':None,'collection_permitted':False}
+  probe_file=root/'note-probe.json';m.evidence(probe_file,probe)
+  review=f.put('review.json',{'reader':'codex','reviewed':True,'body_read':True,'capture_sha256':probe['capture']['sha256'],
+    'summary':'Read the synthetic narrative and author.','positions':['/title','/body','/authors'],
+    'comments_read':False,'media_read':False})
+  with self.mocks():result=m.attest(probe_file,review,'new')
+  self.completed_grant=m.check_pointer(result['grant']);self.completed_root=root
+  return next((f.p/'account-guard/project-tab-preparations').glob('*.done.json')).with_suffix('').with_suffix('.json')
+ def migrate_records(self):
+  import shutil,hashlib
+  record=self.completed_chain();self.old_guard=self.fixture.p/'account-guard';self.old_guard.chmod(0o700)
+  self.new_guard=self.fixture.p/'durable-guard';shutil.copytree(self.old_guard,self.new_guard);self.new_guard.chmod(0o700)
+  hashes={str(p.relative_to(self.old_guard)):hashlib.sha256(p.read_bytes()).hexdigest() for p in self.old_guard.rglob('*.json')}
+  self.migration={'format':1,'source':str(self.old_guard),'destination':str(self.new_guard),'collection_permitted':False,
+    'fresh_web_validation_required':True,'source_unchanged':True,'api_and_media_restrictions_preserved':True,
+    'files':hashes,'source_files':hashes}
+  (self.new_guard/'state-migration.json').write_text(json.dumps(self.migration))
+  current=self.new_guard/record.relative_to(self.old_guard);shutil.rmtree(self.old_guard)
+  return current
+ def test_registered_migrated_replacement_is_history_without_reviving_access(self):
+  record=self.migrate_records();before={p:p.read_bytes() for p in self.new_guard.rglob('*.json')}
+  changed=dict(self.fixture.stops,additional={'sha256':'f'*64})
+  with patch.object(t.xp.legacy,'account_root',return_value=self.new_guard),patch.object(t.nr,'current_stops',return_value=changed):
+   t.completed_preparation(record,['k'],historical_only=True)
+   with self.assertRaises(Exception):t.completed_preparation(record,['k'])
+   with self.assertRaises(Exception):m.validated_probe(self.completed_grant['probe'])
+  for p,b in before.items():self.assertEqual(p.read_bytes(),b)
+ def test_changed_inspection_is_rejected_in_migrated_history(self):
+  record=self.migrate_records();marker=record.with_suffix('.replacement.json');mark=json.loads(marker.read_text());intent=m.check_pointer(mark['intent'])
+  other=self.fixture.put('other-inspection.json',{});intent['inspection']=m.pointer(other);Path(mark['intent']['file']).write_text(json.dumps(intent));mark['intent']=m.pointer(mark['intent']['file']);marker.write_text(json.dumps(mark))
+  with patch.object(t.xp.legacy,'account_root',return_value=self.new_guard),self.assertRaisesRegex(Exception,'REPLACEMENT_CHANGED'):
+   t.completed_preparation(record,['k'],historical_only=True)
+ def test_changed_review_still_rejects_migrated_history(self):
+  record=self.migrate_records();Path(self.completed_grant['review']['file']).write_text('{}')
+  with patch.object(t.xp.legacy,'account_root',return_value=self.new_guard),self.assertRaises(Exception):
+   t.completed_preparation(record,['k'],historical_only=True)
+ def test_migrated_history_cannot_bypass_current_parent_stop(self):
+  self.migrate_records()
+  with patch.object(t.xp.legacy,'account_root',return_value=self.new_guard),self.mocks(),patch.object(t.bridge,'lease',side_effect=t.bridge.BridgeError('SHARED_STOP')),patch.object(t,'completed_preparation') as history,self.assertRaisesRegex(Exception,'SHARED_STOP'):
+   t.prepare(self.project/'later',self.source,'old','Synthetic subsequent research.',self.creator)
+  history.assert_not_called()
+
 if __name__=='__main__':unittest.main()
