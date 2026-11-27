@@ -1090,6 +1090,402 @@ export function carouselDom(opts) {
   return {...state,requestedIndex:opts.index,selectionSubmitted:true};
 }
 
+// Guarded, tab-scoped public comment / reply helper. Never touches foreign tabs,
+// direct messages, follows, or retries a submit click once dispatched.
+export async function publicReplyDom(opts) {
+  const action = opts.action || 'public_reply_prepare';
+  if (!['public_reply_prepare', 'public_reply_submit'].includes(action))
+    return {error: 'PUBLIC_REPLY_ACTION_NOT_ALLOWED'};
+  const destination = opts.destination || 'reply_to_comment';
+  if (!['reply_to_comment', 'top_level_comment'].includes(destination))
+    return {error: 'PUBLIC_REPLY_DESTINATION_INVALID'};
+  if (!/^\/(?:explore|search_result)\/[a-f0-9]{24}\/?$/.test(opts.expectedPath || '') ||
+      !/^[a-f0-9]{24}$/.test(opts.uid || '') || !/^[a-f0-9]{24}$/.test(opts.recipientUid || ''))
+    return {error: 'PUBLIC_REPLY_TARGET_REQUIRED'};
+  if (destination === 'reply_to_comment' &&
+      (!/^[a-f0-9]{24}$/.test(opts.recipientCommentId || '') ||
+       !/^[a-f0-9]{24}$/.test(opts.rootCommentId || '')))
+    return {error: 'PUBLIC_REPLY_COMMENT_ID_REQUIRED'};
+  const guard = () => GUARD({...opts, guardOnly: true});
+  const checked = guard();
+  if (checked.error) return checked;
+
+  const sleep = ms => new Promise(resolve => setTimeout(resolve, ms));
+  const norm = v => String(v || '').normalize('NFKC').replace(/\s+/g, '');
+  const visible = e => {
+    if (!e || !e.getClientRects?.().length) return false;
+    const style = typeof getComputedStyle === 'function' ? getComputedStyle(e) : null;
+    return !style || (style.display !== 'none' && !['hidden', 'collapse'].includes(style.visibility) && Number(style.opacity || 1) > 0);
+  };
+  const uidFromHref = href => {
+    try {
+      const u = new URL(href, 'https://www.xiaohongshu.com');
+      if (u.hostname && u.hostname !== 'www.xiaohongshu.com') return '';
+      return u.pathname.match(/^\/user\/profile\/([a-f0-9]{24})\/?$/i)?.[1]?.toLowerCase() || '';
+    } catch { return ''; }
+  };
+  const domId = e => {
+    for (const name of ['data-comment-id', 'data-commentid', 'data-id', 'id']) {
+      const m = String(e?.getAttribute?.(name) || '').match(/^(?:comment[-_])?([a-f0-9]{24})$/i);
+      if (m) return m[1].toLowerCase();
+    }
+    return '';
+  };
+  const itemAuthorUid = item => {
+    const link = item?.querySelector?.('.author-wrapper a[href*="/user/profile/"], a.name[href*="/user/profile/"], a.user-name[href*="/user/profile/"], a[href*="/user/profile/"]');
+    return uidFromHref(link?.getAttribute?.('href') || link?.href || '');
+  };
+  const itemAuthorName = item => {
+    const el = item?.querySelector?.('.author-wrapper .name, a.name, a.user-name, .author-wrapper a[href*="/user/profile/"]');
+    return String(el?.innerText || el?.textContent || '').trim();
+  };
+  const itemText = item => String(item?.querySelector?.('.content, .note-text')?.innerText || item?.querySelector?.('.content, .note-text')?.textContent || '').trim();
+  const scope = document.querySelector('.note-detail-mask,.note-detail-container,.note-container') || document;
+
+  const findComposer = () => {
+    const selectors = [
+      '#content-textarea',
+      '[contenteditable="true"].content-input',
+      '.comment-comp [contenteditable="true"]',
+      '.engage-bar-container [contenteditable="true"]',
+      'textarea.comment-input',
+    ];
+    for (const sel of selectors) {
+      const el = [...scope.querySelectorAll(sel)].find(visible);
+      if (el) return el;
+    }
+    return null;
+  };
+  const findTrigger = () => {
+    const selectors = [
+      '.engage-bar-container .input-box',
+      '.engage-bar .input-box',
+      '.interact-container .input-box',
+      '.engage-bar .content-edit',
+      '.comment-wrapper .input-box',
+      '.engage-bar-container .chat-wrapper',
+    ];
+    for (const sel of selectors) {
+      const el = [...scope.querySelectorAll(sel)].find(visible);
+      if (el) return el;
+    }
+    const spans = [...scope.querySelectorAll('.engage-bar-container span, .engage-bar-container div, .interact-container span, .interact-container div')]
+      .filter(e => visible(e) && /^说点什么/.test(String(e.innerText || e.textContent || '').trim()));
+    return spans.find(e => !spans.some(c => c !== e && e.contains(c))) || null;
+  };
+  const findReplyControl = item => {
+    const candidates = [...item.querySelectorAll('.interactions .reply, .reply.icon-container, .reply-icon, .interactions [class*="reply"], button, [role="button"], span, div')]
+      .filter(el => {
+        if (!visible(el)) return false;
+        if (el.tagName === 'A' || el.getAttribute?.('href') || el.closest?.('a[href], .author-wrapper, .like, .like-wrapper, .follow')) return false;
+        if (el.closest?.('.comment-item, .comment-item-sub') !== item) return false;
+        const cls = String(el.className || '');
+        const txt = String(el.innerText || el.textContent || '').trim();
+        return /(?:^|\s)reply(?:\s|$|-)/.test(cls) || txt === '回复';
+      });
+    const leaf = candidates.find(el => !candidates.some(c => c !== el && el.contains(c)));
+    return leaf || candidates[0] || null;
+  };
+  const findSubmitButton = composer => {
+    const roots = [
+      composer?.closest?.('.comment-comp, .engage-bar-container, .engage-bar, .input-box, .bottom-area, .content-edit'),
+      scope,
+    ].filter(Boolean);
+    for (const root of roots) {
+      const buttons = [...root.querySelectorAll('button.submit, .submit, button, [role="button"], .btn')]
+        .filter(el => {
+          if (!visible(el)) return false;
+          const txt = String(el.innerText || el.textContent || '').trim();
+          const cls = String(el.className || '');
+          return txt === '发送' || (/(?:^|\s)submit(?:\s|$)/.test(cls) && (!txt || txt === '发送'));
+        });
+      const leaf = buttons.find(el => !buttons.some(c => c !== el && el.contains(c))) || buttons[0];
+      if (leaf) {
+        const cls = String(leaf.className || '');
+        const disabled = leaf.disabled === true || leaf.getAttribute?.('aria-disabled') === 'true' ||
+          /(?:^|\s)(?:disabled|gray)(?:\s|$)/.test(cls);
+        return {element: leaf, disabled};
+      }
+    }
+    return null;
+  };
+  const composerReplyHint = composer => {
+    const parts = [];
+    if (composer) {
+      for (const attr of ['placeholder', 'data-placeholder', 'aria-label']) {
+        const v = composer.getAttribute?.(attr);
+        if (v) parts.push(String(v));
+      }
+    }
+    const box = composer?.closest?.('.comment-comp, .engage-bar-container, .engage-bar, .bottom-area, .input-box') || scope;
+    for (const sel of ['.reply-info', '.reply-target', '.reply-user', '.reply-to', '.active-reply', '.reply-banner', '.comment-reply-header', '.input-box .placeholder']) {
+      for (const el of box.querySelectorAll(sel)) {
+        if (visible(el)) parts.push(String(el.innerText || el.textContent || '').trim());
+      }
+    }
+    return parts.filter(Boolean).join(' | ').slice(0, 300);
+  };
+  const readComposerText = composer => {
+    if (!composer) return '';
+    if (composer.tagName === 'TEXTAREA' || composer.tagName === 'INPUT') return String(composer.value || '');
+    return String(composer.innerText ?? composer.textContent ?? '');
+  };
+  const detectAccessWarning = () => {
+    const u = new URL(location.href);
+    if (u.pathname.startsWith('/website-login/') || /^\/login\/?$/.test(u.pathname) || u.searchParams.has('error_code'))
+      return 'url_access_restriction';
+    const dialogs = [...document.querySelectorAll('.login-container,.login-modal,.captcha-container,[role="dialog"],.reds-modal,.verify-modal,.qrcode-modal')]
+      .filter(visible);
+    for (const d of dialogs) {
+      const t = String(d.innerText || d.textContent || '').trim();
+      if (/登录|扫码|验证|安全限制|访问限制|请求太频繁|操作频繁|人机/.test(t)) return t.slice(0, 240);
+    }
+    const toasts = [...document.querySelectorAll('.reds-toast,.toast,[class*="toast"],.xhs-toast,.message-tip')]
+      .filter(visible);
+    for (const el of toasts) {
+      const t = String(el.innerText || el.textContent || '').trim();
+      if (/频繁|验证码|安全限制|封禁|禁言|登录|异常/.test(t)) return t.slice(0, 240);
+    }
+    return '';
+  };
+  const readToasts = () => [...document.querySelectorAll('.reds-toast,.toast,[class*="toast"],.xhs-toast,.message-tip')]
+    .filter(visible).map(e => String(e.innerText || e.textContent || '').trim()).filter(Boolean).slice(0, 4);
+
+  // Collect rendered comments for own-comment dedupe and target matching.
+  const allRows = [];
+  for (const parent of scope.querySelectorAll('.parent-comment')) {
+    const rootItem = parent.querySelector('.comment-item');
+    const rootId = domId(rootItem) || domId(parent);
+    if (rootItem) {
+      allRows.push({item: rootItem, parent, commentId: rootId, parentCommentId: '',
+        authorUid: itemAuthorUid(rootItem), authorName: itemAuthorName(rootItem), text: itemText(rootItem), isReply: false});
+    }
+    for (const reply of parent.querySelectorAll('.reply-container .comment-item-sub, .sub-comment-list .comment-item')) {
+      allRows.push({item: reply, parent, commentId: domId(reply), parentCommentId: rootId,
+        authorUid: itemAuthorUid(reply), authorName: itemAuthorName(reply), text: itemText(reply), isReply: true});
+    }
+  }
+  const ownComments = allRows.filter(r => r.authorUid === opts.uid);
+  const ownTopLevelComments = ownComments.filter(r => !r.isReply);
+
+  let targetRow = null;
+  let replyControl = null;
+  let noteAuthorUid = '';
+  const gaps = [];
+
+  if (destination === 'reply_to_comment') {
+    const matches = allRows.filter(r => r.commentId === opts.recipientCommentId.toLowerCase());
+    if (matches.length !== 1) {
+      return {readOnly: true, uid: checked.uid, url: checked.url, destination,
+        readyForSubmit: false, sendClicked: false,
+        gap: matches.length ? 'RECIPIENT_COMMENT_AMBIGUOUS' : 'RECIPIENT_COMMENT_NOT_RENDERED',
+        matchingCommentNodes: matches.length};
+    }
+    targetRow = matches[0];
+    if (targetRow.authorUid !== opts.recipientUid.toLowerCase()) {
+      return {readOnly: true, uid: checked.uid, url: checked.url, destination,
+        readyForSubmit: false, sendClicked: false, gap: 'RECIPIENT_UID_MISMATCH',
+        observedRecipientUid: targetRow.authorUid};
+    }
+    const observedRoot = targetRow.parentCommentId || targetRow.commentId;
+    if (observedRoot !== opts.rootCommentId.toLowerCase()) {
+      return {readOnly: true, uid: checked.uid, url: checked.url, destination,
+        readyForSubmit: false, sendClicked: false, gap: 'ROOT_THREAD_MISMATCH',
+        observedRootCommentId: observedRoot};
+    }
+    replyControl = findReplyControl(targetRow.item);
+    if (!replyControl) gaps.push('REPLY_CONTROL_NOT_FOUND');
+  } else {
+    const authorLinks = [...scope.querySelectorAll('.author a[href*="/user/profile/"], .author-wrapper a[href*="/user/profile/"]')]
+      .filter(e => !e.closest?.('.comments-container,.comment-item,.comment-item-sub,.reply-container'));
+    noteAuthorUid = authorLinks.map(e => uidFromHref(e.getAttribute?.('href') || e.href || '')).find(Boolean) || '';
+    if (noteAuthorUid !== opts.recipientUid.toLowerCase()) {
+      return {readOnly: true, uid: checked.uid, url: checked.url, destination,
+        readyForSubmit: false, sendClicked: false, gap: 'NOTE_AUTHOR_UID_MISMATCH',
+        observedNoteAuthorUid: noteAuthorUid};
+    }
+  }
+
+  const ownInTargetThread = destination === 'reply_to_comment'
+    ? ownComments.filter(r => (r.parentCommentId || r.commentId) === opts.rootCommentId.toLowerCase())
+    : ownTopLevelComments;
+  const composerNow = findComposer();
+  const triggerNow = findTrigger();
+  if (!composerNow && !triggerNow && destination === 'top_level_comment') gaps.push('COMPOSER_AND_TRIGGER_NOT_FOUND');
+  const warningNow = detectAccessWarning();
+  if (warningNow) return {error: 'ACCESS_STOP', detail: warningNow};
+
+  const preflight = {
+    readOnly: true,
+    uid: checked.uid,
+    url: checked.url,
+    visible: checked.visible,
+    destination,
+    targetVerified: true,
+    recipientUid: opts.recipientUid.toLowerCase(),
+    recipientNameObserved: targetRow ? targetRow.authorName : '',
+    recipientCommentId: targetRow ? targetRow.commentId : null,
+    rootCommentId: targetRow ? (targetRow.parentCommentId || targetRow.commentId) : null,
+    noteAuthorUid: noteAuthorUid || null,
+    replyControlFound: !!replyControl,
+    composerVisible: !!composerNow,
+    triggerFound: !!triggerNow,
+    composerHint: composerReplyHint(composerNow),
+    ownCommentsInNoteCount: ownComments.length,
+    ownCommentsInTargetScopeCount: ownInTargetThread.length,
+    ownCommentIdsInTargetScope: ownInTargetThread.map(r => r.commentId).filter(Boolean),
+    readyForSubmit: gaps.length === 0 && ownInTargetThread.length === 0,
+    gaps,
+    sendClicked: false,
+  };
+  if (action === 'public_reply_prepare') return preflight;
+
+  // Submit mode: explicit opt-in, strict text/target verification, single click only.
+  if (opts.execute !== true || !/^[a-f0-9]{64}$/.test(opts.intentDigest || ''))
+    return {error: 'PUBLIC_REPLY_EXECUTE_INTENT_REQUIRED'};
+  const message = String(opts.message || '').trim();
+  if (!message || message.length > 500 || message.includes('\u0000'))
+    return {error: 'PUBLIC_REPLY_MESSAGE_INVALID'};
+  if (ownInTargetThread.length > 0)
+    return {...preflight, readOnly: false, gap: 'OWN_COMMENT_ALREADY_IN_TARGET_SCOPE', sendClicked: false};
+  if (gaps.length > 0)
+    return {...preflight, readOnly: false, gap: gaps[0], sendClicked: false};
+
+  // 1. Open/focus composer bound to exact destination.
+  if (destination === 'reply_to_comment') {
+    try { replyControl.scrollIntoView?.({block: 'center', inline: 'nearest', behavior: 'instant'}); } catch {}
+    replyControl.click();
+  } else if (!composerNow && triggerNow) {
+    try { triggerNow.scrollIntoView?.({block: 'center', inline: 'nearest', behavior: 'instant'}); } catch {}
+    triggerNow.click();
+  }
+
+  let composer = null;
+  for (let i = 0; i < 15; i++) {
+    composer = findComposer();
+    if (composer) break;
+    await sleep(100);
+  }
+  if (!composer) return {...preflight, readOnly: false, gap: 'COMPOSER_DID_NOT_OPEN', sendClicked: false};
+
+  const hintAfterOpen = composerReplyHint(composer);
+  if (destination === 'reply_to_comment') {
+    const expectedName = String(opts.recipientName || targetRow?.authorName || '').trim();
+    if (expectedName && hintAfterOpen && !norm(hintAfterOpen).includes(norm(expectedName))) {
+      return {...preflight, readOnly: false, gap: 'REPLY_TARGET_HINT_MISMATCH',
+        observedHint: hintAfterOpen, expectedRecipientName: expectedName, sendClicked: false};
+    }
+  } else {
+    if (/回复\s*[^\s:|]{1,40}/.test(hintAfterOpen)) {
+      return {...preflight, readOnly: false, gap: 'STALE_REPLY_TARGET_ACTIVE',
+        observedHint: hintAfterOpen, sendClicked: false};
+    }
+  }
+
+  const beforeType = guard();
+  if (beforeType.error) return beforeType;
+
+  // 2. Populate exact message into composer and trigger Vue/DOM input handlers.
+  composer.focus?.();
+  if (composer.tagName === 'TEXTAREA' || composer.tagName === 'INPUT') {
+    const proto = Object.getOwnPropertyDescriptor(Object.getPrototypeOf(composer), 'value');
+    if (proto?.set) proto.set.call(composer, message);
+    else composer.value = message;
+    composer.dispatchEvent(new Event('input', {bubbles: true}));
+    composer.dispatchEvent(new Event('change', {bubbles: true}));
+  } else {
+    composer.textContent = '';
+    let inserted = false;
+    try {
+      const sel = window.getSelection?.();
+      const range = document.createRange?.();
+      if (sel && range) {
+        range.selectNodeContents(composer);
+        range.collapse(false);
+        sel.removeAllRanges();
+        sel.addRange(range);
+      }
+      if (typeof document.execCommand === 'function') {
+        inserted = document.execCommand('insertText', false, message);
+      }
+    } catch { inserted = false; }
+    if (!inserted || norm(readComposerText(composer)) !== norm(message)) {
+      composer.textContent = message;
+      try {
+        composer.dispatchEvent(new InputEvent('input', {bubbles: true, data: message, inputType: 'insertText'}));
+      } catch {
+        composer.dispatchEvent(new Event('input', {bubbles: true}));
+      }
+    }
+  }
+  await sleep(250);
+
+  // 3. Read back actual composer text and verify submit control before clicking.
+  const draftText = readComposerText(composer);
+  if (norm(draftText) !== norm(message)) {
+    return {...preflight, readOnly: false, gap: 'DRAFT_TEXT_MISMATCH',
+      observedDraftLength: draftText.length, expectedMessageLength: message.length, sendClicked: false};
+  }
+  let submitInfo = null;
+  for (let i = 0; i < 6; i++) {
+    submitInfo = findSubmitButton(composer);
+    if (submitInfo && !submitInfo.disabled) break;
+    await sleep(100);
+  }
+  if (!submitInfo || submitInfo.disabled) {
+    return {...preflight, readOnly: false, gap: 'SUBMIT_BUTTON_UNAVAILABLE',
+      submitButtonFound: !!submitInfo, submitButtonDisabled: submitInfo?.disabled ?? null, sendClicked: false};
+  }
+
+  const beforeClick = guard();
+  if (beforeClick.error) return beforeClick;
+  const warningBeforeClick = detectAccessWarning();
+  if (warningBeforeClick) return {error: 'ACCESS_STOP', detail: warningBeforeClick, sendClicked: false};
+
+  // 4. Exactly ONE click. No retry on any outcome.
+  const clickedAt = new Date().toISOString();
+  submitInfo.element.click();
+
+  let accessWarning = '';
+  let toasts = [];
+  let composerCleared = false;
+  let immediateDomVisible = false;
+  const waitRounds = Number.isInteger(opts.postClickPollRounds) ? Math.max(1, Math.min(opts.postClickPollRounds, 12)) : 8;
+  const waitMs = Number.isInteger(opts.postClickPollMs) ? Math.max(0, Math.min(opts.postClickPollMs, 500)) : 300;
+  for (let i = 0; i < waitRounds; i++) {
+    if (waitMs > 0) await sleep(waitMs);
+    accessWarning = detectAccessWarning();
+    toasts = readToasts();
+    const curComposer = findComposer();
+    composerCleared = !curComposer || !norm(readComposerText(curComposer));
+    const currentOwn = [...scope.querySelectorAll('.parent-comment .comment-item, .parent-comment .reply-container .comment-item-sub, .parent-comment .sub-comment-list .comment-item')]
+      .some(item => itemAuthorUid(item) === opts.uid && norm(itemText(item)).includes(norm(message)));
+    if (currentOwn) immediateDomVisible = true;
+    if (accessWarning || (composerCleared && (immediateDomVisible || toasts.length > 0))) break;
+  }
+
+  return {
+    readOnly: false,
+    action: 'public_reply_submit',
+    destination,
+    uid: checked.uid,
+    url: location.href,
+    intentDigest: opts.intentDigest,
+    sendClicked: true,
+    clicksSubmitted: 1,
+    clickedAt,
+    observedHint: hintAfterOpen,
+    draftVerified: true,
+    composerCleared,
+    immediateDomVisible,
+    toasts,
+    captchaObserved: !!accessWarning,
+    accessWarningText: accessWarning,
+    verificationRequired: true,
+    noAutomaticRetry: true,
+  };
+}
+
 async function main(cfg) {
   if (['active_user_tab','diagnose_active_user_tab'].includes(cfg.action)) {
     const pkg=path.resolve(cfg.packageRoot);
@@ -1127,7 +1523,7 @@ async function main(cfg) {
       throw new Error('USER_TAB_CHANGED');
     return {page:result.page,url:after.url,chromeTabId:after.id,windowId:after.windowId,owned:false};
   }
-  if (!['profiles','doctor','create','lease_status','probe_registered_target','locate_registered_url','registered_window_state','metadata','identity','capture','verified_capture','advance','navigate','reload','activate','close','deep','screenshot','media_state','media_select','scroll_diagnose','comment_diagnose','comment_media_state','comment_media_focus','comment_media_open','comment_media_viewer_state','comment_media_display_state','comment_media_enlarge','comment_media_restore'].includes(cfg.action)) throw new Error('ACTION_NOT_ALLOWED');
+  if (!['profiles','doctor','create','lease_status','probe_registered_target','locate_registered_url','registered_window_state','metadata','identity','capture','verified_capture','advance','navigate','reload','activate','close','deep','screenshot','media_state','media_select','scroll_diagnose','comment_diagnose','comment_media_state','comment_media_focus','comment_media_open','comment_media_viewer_state','comment_media_display_state','comment_media_enlarge','comment_media_restore','public_reply_prepare','public_reply_submit'].includes(cfg.action)) throw new Error('ACTION_NOT_ALLOWED');
   const pkg=path.resolve(cfg.packageRoot);
   const meta=JSON.parse(fs.readFileSync(path.join(pkg,'package.json'),'utf8'));
   if (meta.name!=='@jackwener/opencli' || meta.version!=='2.0.2') throw new Error('CAPABILITY_MISMATCH');
@@ -1273,6 +1669,24 @@ async function main(cfg) {
         displayIntentId:cfg.displayIntentId,expectedDisplayState:cfg.expectedDisplayState,originalDisplayState:cfg.originalDisplayState})})`);}
       catch(error) {
         if (['comment_media_focus','comment_media_open','comment_media_enlarge','comment_media_restore'].includes(cfg.action))
+          throw Object.assign(new Error('COMMAND_OUTCOME_UNKNOWN'),{detail:String(error.detail || error.message).slice(0,300)});
+        throw error;
+      }
+    }
+    if (['public_reply_prepare','public_reply_submit'].includes(cfg.action)) {
+      if (!cfg.expectedPath || !/^\/(?:explore|search_result)\/[a-f0-9]{24}\/?$/.test(cfg.expectedPath))
+        throw new Error('NOTE_TARGET_REQUIRED');
+      if (cfg.action==='public_reply_submit' && (cfg.execute!==true || !/^[a-f0-9]{64}$/.test(cfg.intentDigest || '')))
+        throw new Error('PUBLIC_REPLY_EXECUTE_INTENT_REQUIRED');
+      const source=publicReplyDom.toString().replace('GUARD({...opts, guardOnly: true})',
+        `(${domSource(inspectDom)})({...opts,guardOnly:true})`);
+      const replyArgs={...args,action:cfg.action,destination:cfg.destination || 'reply_to_comment',
+        recipientUid:cfg.recipientUid,recipientName:cfg.recipientName || '',
+        recipientCommentId:cfg.recipientCommentId || '',rootCommentId:cfg.rootCommentId || '',
+        message:cfg.message || '',execute:cfg.execute===true,intentDigest:cfg.intentDigest || ''};
+      try {return await evaluateOnce(`(${source})(${JSON.stringify(replyArgs)})`);}
+      catch(error) {
+        if (cfg.action==='public_reply_submit')
           throw Object.assign(new Error('COMMAND_OUTCOME_UNKNOWN'),{detail:String(error.detail || error.message).slice(0,300)});
         throw error;
       }

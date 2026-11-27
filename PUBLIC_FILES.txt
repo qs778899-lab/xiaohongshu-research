@@ -34,6 +34,7 @@ references/note-link-validation.md
 references/observed-review.md
 references/person-search.md
 references/project-v2.md
+references/public-reply-execution.md
 references/public-reply-verification.md
 references/research-desk.md
 references/rounds-v26.md
@@ -137,7 +138,9 @@ scripts/test_prepare_target_visibility.py
 scripts/test_project.py
 scripts/test_project_tab.mjs
 scripts/test_project_tab.py
+scripts/test_public_reply.py
 scripts/test_public_reply_check.py
+scripts/test_public_reply_dom.mjs
 scripts/test_publication.py
 scripts/test_publication_history.py
 scripts/test_queue_independent.py
@@ -199,6 +202,7 @@ scripts/xhs_people.py
 scripts/xhs_project.py
 scripts/xhs_project_tab.mjs
 scripts/xhs_project_tab.py
+scripts/xhs_public_reply.py
 scripts/xhs_public_reply_check.py
 scripts/xhs_queue.py
 scripts/xhs_recall.py

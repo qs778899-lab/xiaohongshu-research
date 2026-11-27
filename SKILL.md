@@ -33,7 +33,7 @@ description: 深入检索小红书笔记、评论、楼中楼和相关媒体，�
 
 - 扫码界面打不开或验证尚未完成时，先走[验证界面诊断](references/manual-tab-recovery.md#验证界面诊断与恢复分开)的 `diagnose-active`，不要用需要恢复确认的 `inspect-active` 代替诊断。诊断不解锁采集；旧弹窗消失不等于已验证，也不通过重新发送评论触发弹窗。
 
-- 已获授权的公开问询在发送后状态不明时，按[发布结果只读复核](references/public-reply-verification.md)在验证恢复后优先重开原帖、读完整楼；区分当前可见、完整复核未见及尚未核完，不能只留“未知”就继续扩词。不因此授权发送或补发。
+- 已获授权的公开问询需要通过已绑定标签页执行或发送后状态不明时，执行遵循[标签页级受守卫的公开问询执行](references/public-reply-execution.md)（独立显式 opt-in 脚本 `xhs_public_reply.py`，先预检、先记账、跨账号 UID 去重、单次不可重放、遇验证码立即写 `STOP`），复核遵循[发布结果只读复核](references/public-reply-verification.md)在验证恢复后优先重开原帖、读完整楼；区分当前可见、完整复核未见及尚未核完，不能只留“未知”就继续扩词。不自动补发、不私信、不互关。
 
 - 持续文字检索优先在原授权绑定启用 `text-mode --binding B --mode background`；后台正文、搜索和评论沿用目标与账号校验，图片及视觉核查继续原前台流程。模式切换、只读窗口诊断和实测边界见[后台文字采集](references/background-text-collection.md)。
 
