@@ -414,4 +414,302 @@ class PresearchReplacementTests(unittest.TestCase):
   (root/'normal-note.json').write_text('{}')
   with patch.object(m.nr,'current_stops',return_value=f.stops),self.assertRaises(Exception):t.completed_preparation(record,['k'])
 
+
+
+
+class MigratedHistoricalRecordTests(unittest.TestCase):
+ def setUp(self):
+  self.tmp=tempfile.TemporaryDirectory();self.addCleanup(self.tmp.cleanup)
+  self.base=Path(self.tmp.name).resolve();self.old=self.base/'old-guard';self.new=self.base/'durable-guard'
+  self.old.mkdir(mode=0o700);self.new.mkdir(mode=0o700)
+  self.relative=Path('project-tab-preparations')/('a'*64+'.json')
+  self.source=self.old/self.relative;self.source.parent.mkdir();m.evidence(self.source,{'synthetic':'consumed-once'})
+  self.ref=m.pointer(self.source);self.target=self.new/self.relative;self.target.parent.mkdir();self.target.write_bytes(self.source.read_bytes())
+  self.report={'format':1,'source':str(self.old),'destination':str(self.new),'collection_permitted':False,
+    'fresh_web_validation_required':True,'source_unchanged':True,'api_and_media_restrictions_preserved':True,
+    'files':{str(self.relative):self.ref['sha256']},'source_files':{str(self.relative):self.ref['sha256']}}
+  self.manifest=self.new/'state-migration.json';self.write_manifest()
+  self.guard=patch.object(t.xp.legacy,'account_root',return_value=self.new);self.guard.start();self.addCleanup(self.guard.stop)
+ def write_manifest(self):self.manifest.write_text(json.dumps(self.report))
+ def check(self,ref=None):return t.historical_account_record(ref or self.ref,self.target)
+ def test_registered_copy_preserves_consumption_when_source_was_cleaned(self):
+  self.source.unlink();before=self.target.read_bytes();self.assertEqual(self.check(),{'synthetic':'consumed-once'});self.assertEqual(self.target.read_bytes(),before)
+ def test_exact_current_pointer_needs_no_migration(self):
+  self.manifest.unlink();self.assertEqual(self.check(m.pointer(self.target)),{'synthetic':'consumed-once'})
+ def test_arbitrary_old_path_is_rejected_even_with_identical_bytes(self):
+  other=self.base/'other.json';other.write_bytes(self.source.read_bytes())
+  with self.assertRaisesRegex(Exception,'MIGRATION_SOURCE_CHANGED'):self.check(m.pointer(other))
+ def test_changed_current_bytes_are_rejected(self):
+  self.target.write_text('{}')
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):self.check()
+ def test_still_present_but_changed_old_bytes_are_rejected(self):
+  self.source.write_text('{}')
+  with self.assertRaises(Exception):self.check()
+ def test_missing_original_hash_registration_is_rejected(self):
+  del self.report['source_files'][str(self.relative)];self.write_manifest()
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):self.check()
+ def test_missing_copy_hash_registration_is_rejected(self):
+  del self.report['files'][str(self.relative)];self.write_manifest()
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):self.check()
+ def test_malformed_manifest_and_changed_destination_are_rejected(self):
+  self.manifest.write_text('not-json')
+  with self.assertRaises(Exception):self.check()
+  self.report['destination']=str(self.old);self.write_manifest()
+  with self.assertRaisesRegex(Exception,'MIGRATION_CHANGED'):self.check()
+ def test_missing_manifest_is_not_an_implicit_migration(self):
+  self.manifest.unlink()
+  with self.assertRaisesRegex(Exception,'MIGRATION_REQUIRED'):self.check()
+ def test_symlinked_manifest_is_rejected(self):
+  actual=self.base/'actual-manifest.json';actual.write_bytes(self.manifest.read_bytes());self.manifest.unlink();self.manifest.symlink_to(actual)
+  with self.assertRaisesRegex(Exception,'MIGRATION_REQUIRED'):self.check()
+ def test_migration_cannot_claim_collection_permission(self):
+  self.report['collection_permitted']=True;self.write_manifest()
+  with self.assertRaisesRegex(Exception,'MIGRATION_CHANGED'):self.check()
+ def test_current_record_symlink_cannot_bypass_missing_manifest(self):
+  self.target.unlink();self.target.symlink_to(self.source);self.manifest.unlink()
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):self.check()
+ def test_current_record_symlink_cannot_bypass_manifest_validation(self):
+  self.target.unlink();self.target.symlink_to(self.source)
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):self.check()
+ def test_parent_directory_symlink_cannot_bypass_missing_manifest(self):
+  self.target.unlink();self.target.parent.rmdir();self.target.parent.symlink_to(self.source.parent,target_is_directory=True);self.manifest.unlink()
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):self.check()
+ def test_current_record_outside_account_root_is_rejected_before_exact_match(self):
+  with self.assertRaisesRegex(Exception,'MIGRATION_RECORD_CHANGED'):
+   t.historical_account_record(self.ref,self.source)
+
+
+class MigratedCompletedReplacementTests(PresearchReplacementTests):
+ def completed_chain(self):
+  with self.mocks():r=self.run_replace()
+  f=self.fixture;initial=Path(r['inspection']);root=initial.parent;inspected=m.check_pointer(m.pointer(initial))
+  capture={'uid':f.uid,'url':'https://www.xiaohongshu.com/search_result?keyword=example&type=51',
+    'cards':[{'url':'https://www.xiaohongshu.com/explore/'+'3'*24,'text':'Synthetic diary'}]}
+  search=dict(inspected,initial_inspection=m.pointer(initial),capture=m.evidence(root/'actual-search.json',capture))
+  note={'uid':f.uid,'url':capture['cards'][0]['url'],'title':'Synthetic diary','body':'Synthetic treatment narrative.',
+    'authors':[{'name':'synthetic','url':'https://www.xiaohongshu.com/user/profile/'+'5'*24}]}
+  b=copy.deepcopy(inspected['binding']);b['tabs']['detail']['last_url']=note['url'];b['tabs']['search']=b['tabs']['detail']
+  probe={'kind':m.KIND,'binding':b,'inspection':m.evidence(root/'search-probe.json',search),
+    'capture':m.evidence(root/'normal-note.json',note),'excluded_note_id':None,'collection_permitted':False}
+  probe_file=root/'note-probe.json';m.evidence(probe_file,probe)
+  review=f.put('review.json',{'reader':'codex','reviewed':True,'body_read':True,'capture_sha256':probe['capture']['sha256'],
+    'summary':'Read the synthetic narrative and author.','positions':['/title','/body','/authors'],
+    'comments_read':False,'media_read':False})
+  with self.mocks():result=m.attest(probe_file,review,'new')
+  self.completed_grant=m.check_pointer(result['grant']);self.completed_root=root
+  return next((f.p/'account-guard/project-tab-preparations').glob('*.done.json')).with_suffix('').with_suffix('.json')
+ def migrate_records(self):
+  import shutil,hashlib
+  record=self.completed_chain();self.old_guard=self.fixture.p/'account-guard';self.old_guard.chmod(0o700)
+  self.new_guard=self.fixture.p/'durable-guard';shutil.copytree(self.old_guard,self.new_guard);self.new_guard.chmod(0o700)
+  hashes={str(p.relative_to(self.old_guard)):hashlib.sha256(p.read_bytes()).hexdigest() for p in self.old_guard.rglob('*.json')}
+  self.migration={'format':1,'source':str(self.old_guard),'destination':str(self.new_guard),'collection_permitted':False,
+    'fresh_web_validation_required':True,'source_unchanged':True,'api_and_media_restrictions_preserved':True,
+    'files':hashes,'source_files':hashes}
+  (self.new_guard/'state-migration.json').write_text(json.dumps(self.migration))
+  current=self.new_guard/record.relative_to(self.old_guard);shutil.rmtree(self.old_guard)
+  return current
+ def test_registered_migrated_replacement_is_history_without_reviving_access(self):
+  record=self.migrate_records();before={p:p.read_bytes() for p in self.new_guard.rglob('*.json')}
+  changed=dict(self.fixture.stops,additional={'sha256':'f'*64})
+  with patch.object(t.xp.legacy,'account_root',return_value=self.new_guard),patch.object(t.nr,'current_stops',return_value=changed):
+   t.completed_preparation(record,['k'],historical_only=True)
+   with self.assertRaises(Exception):t.completed_preparation(record,['k'])
+   with self.assertRaises(Exception):m.validated_probe(self.completed_grant['probe'])
+  for p,b in before.items():self.assertEqual(p.read_bytes(),b)
+ def test_changed_inspection_is_rejected_in_migrated_history(self):
+  record=self.migrate_records();marker=record.with_suffix('.replacement.json');mark=json.loads(marker.read_text());intent=m.check_pointer(mark['intent'])
+  other=self.fixture.put('other-inspection.json',{});intent['inspection']=m.pointer(other);Path(mark['intent']['file']).write_text(json.dumps(intent));mark['intent']=m.pointer(mark['intent']['file']);marker.write_text(json.dumps(mark))
+  with patch.object(t.xp.legacy,'account_root',return_value=self.new_guard),self.assertRaisesRegex(Exception,'REPLACEMENT_CHANGED'):
+   t.completed_preparation(record,['k'],historical_only=True)
+ def test_changed_review_still_rejects_migrated_history(self):
+  record=self.migrate_records();Path(self.completed_grant['review']['file']).write_text('{}')
+  with patch.object(t.xp.legacy,'account_root',return_value=self.new_guard),self.assertRaises(Exception):
+   t.completed_preparation(record,['k'],historical_only=True)
+ def test_migrated_history_cannot_bypass_current_parent_stop(self):
+  self.migrate_records()
+  with patch.object(t.xp.legacy,'account_root',return_value=self.new_guard),self.mocks(),patch.object(t.bridge,'lease',side_effect=t.bridge.BridgeError('SHARED_STOP')),patch.object(t,'completed_preparation') as history,self.assertRaisesRegex(Exception,'SHARED_STOP'):
+   t.prepare(self.project/'later',self.source,'old','Synthetic subsequent research.',self.creator)
+  history.assert_not_called()
+
+
+
+
+class PrebindMissingReplacementTests(unittest.TestCase):
+ def setUp(self):
+  self.fixture=manual_fixtures.ManualTabTests(methodName='runTest');self.fixture.setUp();self.addCleanup(self.fixture.doCleanups)
+  f=self.fixture;self.source=f.p;self.project=f.p/'dest';f.url=t.HOME
+  f.parent['tabs']['detail'].update(page='P'*32,chrome_tab_id=10,window_id=22,last_url=t.HOME,session='parent-session')
+  f.parent['tabs']['detail'].pop('navigation_intent');self.created=0;self.native_state='absent';self.probes=0;self.unknown_create=False
+  case=self;original=f.driver
+  class Driver(original):
+   def call(self,action,b=None,role=None,**kw):
+    if b and b.get('binding_name')=='old' and action in ('metadata','identity'):
+     f.calls.append(action);return {'page':'P'*32,'url':t.HOME,'uid':f.uid}
+    return super().call(action,b,role,**kw)
+  self.driver=Driver;f.adopt_error='USER_TAB_NOT_FOCUSED'
+  with self.mocks(),self.assertRaisesRegex(Exception,'USER_TAB_NOT_FOCUSED'):
+   t.prepare(self.project,self.source,'old','Synthetic autonomous research.',self.creator)
+  self.attempt_file=next((self.project/'bridge/manual-tab-recoveries').glob('*/attempt.json'));self.root=self.attempt_file.parent
+  self.attempt=m.check_pointer(m.pointer(self.attempt_file))
+  m.evidence(self.root/'finish-inspection-attempt.json',{'at':t.xp.legacy.now(),'attempt':m.pointer(self.attempt_file),
+    'failure':m.pointer(self.root/'inspection-failure.json'),'previous':None,'focus_metadata':None})
+  self.error=f.put('native-missing.json',{'at':t.xp.legacy.now(),'action':'adopt_user_tab','role':None,
+    'error':{'code':'CONNECTOR_ERROR','detail':'chrome.tabs.get: No tab with id: 12.'}})
+  m.evidence(self.root/'finish-inspection-failure.json',{'at':t.xp.legacy.now(),'collection_permitted':False,'error':'CONNECTOR_ERROR'})
+  f.adopt_error=None;f.calls=[]
+ @contextlib.contextmanager
+ def mocks(self):
+  @contextlib.contextmanager
+  def lease(*args):yield ['k']
+  with self.fixture.mocks(),patch.object(t.bridge,'lease',lease),patch.object(t.bridge,'Driver',self.driver):yield
+ def creator(self,*a):
+  self.created+=1
+  if self.unknown_create:raise t.bridge.BridgeError('PROJECT_TAB_CREATE_OUTCOME_UNKNOWN')
+  return {'tabId':11+self.created,'windowId':22,'url':t.HOME,'active':True}
+ def prober(self,parent,meta,target):
+  self.probes+=1
+  if self.native_state=='unknown':raise t.bridge.BridgeError('CONNECTOR_ERROR')
+  if self.native_state=='present':return {'state':'native_target_present','tabId':target['tabId']}
+  return {'state':'native_target_absent','tabId':target['tabId'],'windowId':target['windowId']}
+ def run_replace(self):
+  return t.replace_missing_prebind_home(self.project,self.source,'old','Synthetic authorized continuation.',self.attempt_file,self.error,self.creator,self.prober)
+ def test_known_creation_can_be_replaced_once_before_binding(self):
+  before={p:p.read_bytes() for p in self.root.glob('*.json')}
+  with self.mocks():r=self.run_replace();again=self.run_replace()
+  self.assertEqual(self.created,2);self.assertEqual(self.probes,1);self.assertEqual(r,again)
+  self.assertFalse(r['collection_permitted']);self.assertTrue(r['fresh_search_and_body_required'])
+  for p,b in before.items():self.assertEqual(p.read_bytes(),b)
+ def test_existing_native_tab_prevents_creation(self):
+  self.native_state='present'
+  with self.mocks(),self.assertRaisesRegex(Exception,'EXACT_ABSENCE'):self.run_replace()
+  self.assertEqual(self.created,1)
+ def test_unknown_native_probe_does_not_replay_or_create(self):
+  self.native_state='unknown'
+  with self.mocks():
+   with self.assertRaisesRegex(Exception,'CONNECTOR_ERROR'):self.run_replace()
+   with self.assertRaises(Exception):self.run_replace()
+  self.assertEqual(self.created,1);self.assertEqual(self.probes,1)
+ def test_unknown_creation_is_not_replayed(self):
+  self.unknown_create=True
+  with self.mocks():
+   with self.assertRaisesRegex(Exception,'OUTCOME_UNKNOWN'):self.run_replace()
+   with self.assertRaises(Exception):self.run_replace()
+  self.assertEqual(self.created,2);self.assertEqual(self.probes,1)
+ def test_replacement_lost_before_adoption_cannot_create_a_third_tab(self):
+  self.fixture.adopt_error='USER_TAB_NOT_FOCUSED'
+  with self.mocks():
+   with self.assertRaisesRegex(Exception,'USER_TAB_NOT_FOCUSED'):self.run_replace()
+   with self.assertRaises(Exception):self.run_replace()
+  self.assertEqual(self.created,2);self.assertEqual(self.probes,1)
+ def test_new_stop_rejects_before_native_probe(self):
+  self.fixture.stops=dict(self.fixture.stops,new={'sha256':'f'*64})
+  with self.mocks(),self.assertRaisesRegex(Exception,'STOP_CHANGED'):self.run_replace()
+  self.assertEqual(self.probes,0);self.assertEqual(self.created,1)
+ def test_invalid_current_parent_rejects_before_native_probe(self):
+  with self.mocks(),patch.object(t.bridge,'lease',side_effect=t.bridge.BridgeError('SHARED_STOP')),self.assertRaisesRegex(Exception,'SHARED_STOP'):self.run_replace()
+  self.assertEqual(self.probes,0);self.assertEqual(self.created,1)
+ def test_identity_mismatch_rejects_before_native_probe(self):
+  case=self
+  class Wrong(self.driver):
+   def call(self,action,b=None,role=None,**kw):
+    result=super().call(action,b,role,**kw)
+    if action=='identity':result['uid']='9'*24
+    return result
+  self.driver=Wrong
+  with self.mocks(),self.assertRaisesRegex(Exception,'PARENT_CHANGED'):self.run_replace()
+  self.assertEqual(self.probes,0);self.assertEqual(self.created,1)
+ def test_any_original_bind_or_search_progress_rejects(self):
+  for name in ['adopted.json','identity.json','loaded-page.json','inspection.json','search-attempt.json','note-attempt.json']:
+   p=self.root/name;p.write_text('{}')
+   with self.mocks(),self.assertRaisesRegex(Exception,'MAY_HAVE_PROGRESS'):self.run_replace()
+   p.unlink()
+  self.assertEqual(self.probes,0);self.assertEqual(self.created,1)
+ def test_imprecise_or_different_native_error_rejects(self):
+  value=json.loads(self.error.read_text())
+  for message in ['chrome.tabs.get: No tab with id: 999.','Connection timed out']:
+   changed=copy.deepcopy(value);changed['error']['detail']=message;self.error.write_text(json.dumps(changed))
+   with self.mocks(),self.assertRaisesRegex(Exception,'EXACT_ABSENCE'):self.run_replace()
+  self.assertEqual(self.probes,0)
+ def test_changed_original_created_record_rejects(self):
+  user=m.check_pointer(self.attempt['user']);folder=Path(user['preparation']['file']).parent
+  p=folder/'created.json';value=json.loads(p.read_text());value['tabId']=999;p.write_text(json.dumps(value))
+  with self.mocks(),self.assertRaisesRegex(Exception,'PREPARATION_CHANGED'):self.run_replace()
+  self.assertEqual(self.probes,0)
+ def test_home_only_blocks_further_preparation_until_full_attestation(self):
+  with self.mocks():r=self.run_replace()
+  record=next((self.fixture.p/'account-guard/project-tab-preparations').glob('*.done.json')).with_suffix('').with_suffix('.json')
+  with self.assertRaisesRegex(Exception,'FRESH_ATTESTATION'):t.completed_preparation(record,['k'],historical_only=True)
+ def complete_fresh_chain(self,r):
+  f=self.fixture;initial=Path(r['inspection']);root=initial.parent;inspected=m.check_pointer(m.pointer(initial))
+  capture={'uid':f.uid,'url':'https://www.xiaohongshu.com/search_result?keyword=example&type=51',
+    'cards':[{'url':'https://www.xiaohongshu.com/explore/'+'3'*24,'text':'Synthetic diary'}]}
+  search=dict(inspected,initial_inspection=m.pointer(initial),capture=m.evidence(root/'actual-search.json',capture))
+  note={'uid':f.uid,'url':capture['cards'][0]['url'],'title':'Synthetic diary','body':'Synthetic treatment narrative.',
+    'authors':[{'name':'synthetic','url':'https://www.xiaohongshu.com/user/profile/'+'5'*24}]}
+  b=copy.deepcopy(inspected['binding']);b['tabs']['detail']['last_url']=note['url'];b['tabs']['search']=b['tabs']['detail']
+  probe={'kind':m.KIND,'binding':b,'inspection':m.evidence(root/'search-probe.json',search),
+    'capture':m.evidence(root/'normal-note.json',note),'excluded_note_id':None,'collection_permitted':False}
+  probe_file=root/'note-probe.json';m.evidence(probe_file,probe)
+  review=f.put('replacement-review.json',{'reader':'codex','reviewed':True,'body_read':True,'capture_sha256':probe['capture']['sha256'],
+    'summary':'Read the synthetic narrative and author.','positions':['/title','/body','/authors'],'comments_read':False,'media_read':False})
+  with self.mocks():m.attest(probe_file,review,'replacement-ready')
+ def test_completed_new_chain_allows_later_history_checks_and_preparation(self):
+  with self.mocks():r=self.run_replace()
+  self.complete_fresh_chain(r)
+  record=next((self.fixture.p/'account-guard/project-tab-preparations').glob('*.done.json')).with_suffix('').with_suffix('.json')
+  with patch.object(t.nr,'current_stops',return_value=self.fixture.stops):t.completed_preparation(record,['k'],historical_only=True)
+  original=t.bridge.load_binding
+  def load(project,name):return self.fixture.parent if Path(project)==self.source else original(project,name)
+  with self.mocks(),patch.object(t.bridge,'load_binding',side_effect=load),patch.object(t.manual,'inspect',return_value=r):
+   later=t.prepare(self.project/'later',self.source,'old','Synthetic next research.',self.creator)
+  self.assertFalse(later['collection_permitted']);self.assertEqual(self.created,3)
+
+
+
+
+class PrebindEntrypointTests(unittest.TestCase):
+ def cli_args(self):
+  return ['xhs_project_tab.py','--project','/tmp/synthetic-dest','--parent-project','/tmp/synthetic-parent',
+    '--binding','synthetic','--authorization','Synthetic authorized task.',
+    '--replace-missing-before-binding','/tmp/synthetic-attempt.json','--absence-error','/tmp/synthetic-error.json']
+ def test_cli_prebind_routes_once_without_falling_through_to_prepare(self):
+  import io,sys
+  result={'collection_permitted':False,'replacement_home':True}
+  with patch.object(sys,'argv',self.cli_args()),patch.object(t,'replace_missing_prebind_home',return_value=result) as replacement,patch.object(t,'prepare') as prepare,contextlib.redirect_stdout(io.StringIO()) as output:
+   t.main()
+  replacement.assert_called_once();prepare.assert_not_called();self.assertEqual(json.loads(output.getvalue()),result)
+ def test_cli_rejects_conflicting_replacement_modes_before_any_operation(self):
+  import sys
+  for extra in [['--renew-from-inspection','/tmp/synthetic-inspection.json'],['--replace-missing-before-search','/tmp/synthetic-inspection.json']]:
+   with patch.object(sys,'argv',self.cli_args()+extra),patch.object(t,'replace_missing_prebind_home') as replacement,patch.object(t,'prepare') as prepare,self.assertRaisesRegex(Exception,'MODE_CONFLICT'):
+    t.main()
+   replacement.assert_not_called();prepare.assert_not_called()
+ def test_cli_rejects_legacy_mode_conflict_and_unpaired_absence_error(self):
+  import sys
+  args=self.cli_args();base=args[:args.index('--replace-missing-before-binding')]
+  for extra in [['--renew-from-inspection','/tmp/synthetic-inspection.json','--replace-missing-before-search','/tmp/synthetic-inspection.json'],
+                ['--absence-error','/tmp/synthetic-error.json'],
+                ['--replace-missing-before-search','/tmp/synthetic-inspection.json','--absence-error','/tmp/synthetic-error.json']]:
+   with patch.object(sys,'argv',base+extra),patch.object(t,'replace_missing_prebind_home') as prebind,patch.object(t,'replace_missing_presearch_home') as presearch,patch.object(t,'prepare') as prepare,self.assertRaisesRegex(Exception,'MODE_CONFLICT'):
+    t.main()
+   prebind.assert_not_called();presearch.assert_not_called();prepare.assert_not_called()
+ def test_python_probe_json_reaches_real_node_probe_dispatch_without_creation(self):
+  import os,shutil,subprocess
+  node=os.environ.get('XHS_TEST_NODE') or shutil.which('node')
+  if not node:self.skipTest('A Node executable is required for the cross-language dispatch check.')
+  run=subprocess.run
+  module=Path(t.__file__).with_suffix('.mjs').resolve().as_uri()
+  source='import fs from "node:fs";import {dispatchProjectHome} from '+json.dumps(module)+';'+    'const cfg=JSON.parse(fs.readFileSync(0,"utf8"));const calls=[];'+    'const native=async(method,args)=>{calls.push(method);if(method==="windows.get")return{id:22,type:"normal"};'+    'if(method==="tabs.create")throw Error("UNEXPECTED_CREATION");'+    'if(method==="tabs.get"&&args[0]===11)return{id:11,windowId:22,url:"https://www.xiaohongshu.com/explore"};'+    'if(method==="tabs.get"&&args[0]===12)throw Error("chrome.tabs.get: No tab with id: 12.");throw Error("UNEXPECTED_NATIVE_CALL");};'+    'const data=await dispatchProjectHome(cfg,native);console.log(JSON.stringify({ok:true,data:{...data,calls}}));'
+  captured=[]
+  def invoke(command,**kw):
+   captured.append(json.loads(kw['input']))
+   return run([node,'--input-type=module','-e',source],input=kw['input'],capture_output=True,text=True,timeout=10)
+  parent={'runtime':{'node':node,'package_root':'synthetic-unused','config_dir':'synthetic-unused','cache_dir':'synthetic-unused'},
+    'context_id':'synthetic','extension_version':'1.0.27','tabs':{'detail':{'chrome_tab_id':11,'window_id':22}}}
+  with patch.object(t.subprocess,'run',side_effect=invoke):
+   result=t.probe_prebind_absence(parent,{'url':t.HOME},{'tabId':12,'windowId':22})
+  self.assertEqual(captured[0]['action'],'probe_missing_prebind');self.assertEqual(captured[0]['missingTabId'],12)
+  self.assertEqual(result['state'],'native_target_absent');self.assertEqual(result['calls'],['tabs.get','windows.get','tabs.get'])
+
 if __name__=='__main__':unittest.main()
