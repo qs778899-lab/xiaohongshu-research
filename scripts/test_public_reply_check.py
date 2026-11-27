@@ -105,5 +105,53 @@ class ReplyCheckTest(unittest.TestCase):
         self.data['url']='https://www.xiaohongshu.com/explore/'+'f'*24
         with self.assertRaisesRegex(ValueError,'note mismatch'):self.run_check()
 
+    def test_gemini_reader_accepted_and_unknown_reader_rejected(self):
+        self.data['results'].append(self.own)
+        self.review['reader']='gemini'
+        result=self.run_check()
+        self.assertEqual(result['outcome'],'visible_confirmed')
+        self.review['reader']='other'
+        with self.assertRaisesRegex(ValueError,'Actual source review'):self.run_check()
+
+    def test_top_level_comment_visible_and_absent(self):
+        top_intent = dict(destination='top_level_comment', note_id='a'*24, recipient_uid='c'*24,
+                          account_uid='d'*24, message='Top-level synthetic question?',
+                          submitted_at='2026-01-01T01:00:00+00:00')
+        top_review = dict(reader='gemini', reviewed=True, account_verified=True, account_uid='d'*24,
+                          note_id='a'*24, summary='Read full root comments.',
+                          reviewed_at='2026-01-01T03:00:00+00:00', fresh_page_loaded=True,
+                          root_comments_fully_read=True)
+        self.intent = top_intent
+        self.review = top_review
+        # Absent when full root list is read
+        res_absent = self.run_check()
+        self.assertEqual(res_absent['outcome'], 'not_visible_after_complete_check')
+        self.assertEqual(res_absent['destination'], 'top_level_comment')
+        self.assertFalse(res_absent['resend_permitted'])
+        # Present as nested reply must NOT match top-level
+        self.data['results'].append(dict(commentId='e'*24, authorHrefRaw='/user/profile/'+'d'*24,
+                                         parentCommentId='b'*24, text='Top-level synthetic question?'))
+        self.assertEqual(self.run_check()['outcome'], 'not_visible_after_complete_check')
+        # Present as true top-level comment matches
+        self.data['results'].append(dict(commentId='f'*24, authorHrefRaw='/user/profile/'+'d'*24,
+                                         parentCommentId='', text='Top-level synthetic question?'))
+        res_ok = self.run_check()
+        self.assertEqual(res_ok['outcome'], 'visible_confirmed')
+        self.assertEqual(res_ok['matching_comment_ids'], ['f'*24])
+
+    def test_top_level_comment_rejects_reply_ids_and_incomplete_roots(self):
+        self.intent = dict(destination='top_level_comment', note_id='a'*24, recipient_uid='c'*24,
+                           account_uid='d'*24, message='Top-level question?',
+                           submitted_at='2026-01-01T01:00:00+00:00')
+        self.review = dict(reader='gemini', reviewed=True, account_verified=True, account_uid='d'*24,
+                           note_id='a'*24, summary='Partial read.',
+                           reviewed_at='2026-01-01T03:00:00+00:00', fresh_page_loaded=True,
+                           root_comments_fully_read=True)
+        self.data['deepCoverage']['explicitEnd'] = False
+        self.assertEqual(self.run_check()['outcome'], 'verification_incomplete')
+        self.intent['root_comment_id'] = 'b'*24
+        with self.assertRaisesRegex(ValueError, 'Top-level comment intent'):
+            self.run_check()
+
 
 if __name__=='__main__':unittest.main()

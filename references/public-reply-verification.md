@@ -20,11 +20,11 @@
 
 ## 来源绑定的离线核对器
 
-`xhs_public_reply_check.py --intent I --review R --output O` 只读取本地原文和Codex实际阅读回执，不联网、不发送、不修改问询台账。输出留在仓库外，保留旧核验结果。
+`xhs_public_reply_check.py --intent I --review R --output O` 只读取本地原文和实际阅读回执，不联网、不发送、不修改问询台账。输出留在仓库外，保留旧核验结果。
 
-意图字段：`note_id / root_comment_id / recipient_comment_id / recipient_uid / recipient_name / account_uid / message / submitted_at`。所有日期带时区。
+意图字段：可选 `destination`（默认 `reply_to_comment`，另支持 `top_level_comment`）。回复指定评论时需 `note_id / root_comment_id / recipient_comment_id / recipient_uid / recipient_name / account_uid / message / submitted_at`；原帖一级评论（`destination=top_level_comment`）需 `note_id / recipient_uid / account_uid / message / submitted_at` 且不填回复评论ID。所有日期带时区。
 
-回执字段：`reader=codex / reviewed=true / account_verified=true / account_uid / note_id / root_comment_id / reviewed_at / summary`，以及`observations`数组中的`file / sha256 / observed_at`。每个来源必须是发送后正确原帖的实际网页评论快照；捕获本身没有身份字段时，由同次实际账号核验和回执绑定，不能编造。只有实际新加载并读完整楼时才声明`fresh_page_loaded=true / target_thread_fully_read=true`。
+回执字段：`reader`（`codex` 或 `gemini`）`/ reviewed=true / account_verified=true / account_uid / note_id`（回复模式另需 `root_comment_id`）`/ reviewed_at / summary`，以及`observations`数组中的`file / sha256 / observed_at`。每个来源必须是发送后正确原帖的实际网页评论快照；捕获本身没有身份字段时，由同次实际账号核验和回执绑定，不能编造。只有实际新加载并读完整楼（或一级评论完整分页至末尾）时才声明`fresh_page_loaded=true`与`target_thread_fully_read=true`（或 `root_comments_fully_read=true`）。
 
 捕获沿用现有网页格式：`results`中的评论CID、作者公开链接、原文和回复关系；`deepCoverage`中的末尾、楼层及未读项。核对器拒绝哈希变更、发送前来源、错帖或错账号；未读楼和缺失原文不会被提升为完整未见。它核查材料一致性，不能代替实际浏览和阅读。
 

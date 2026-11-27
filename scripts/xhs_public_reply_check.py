@@ -41,18 +41,34 @@ def reply_text(row, recipient_name):
     return re.sub(r'^\s*回复\s*' + re.escape(name) + r'\s*:\s*', '', value, count=1)
 
 
+ALLOWED_READERS = ('codex', 'gemini')
+ALLOWED_DESTINATIONS = ('reply_to_comment', 'top_level_comment')
+
+
 def assess(intent, review):
-    required = ('note_id', 'root_comment_id', 'recipient_comment_id', 'recipient_uid',
-                'recipient_name', 'account_uid', 'message', 'submitted_at')
+    destination = intent.get('destination') or 'reply_to_comment'
+    require(destination in ALLOWED_DESTINATIONS, 'Unsupported reply destination')
+    if destination == 'reply_to_comment':
+        required = ('note_id', 'root_comment_id', 'recipient_comment_id', 'recipient_uid',
+                    'recipient_name', 'account_uid', 'message', 'submitted_at')
+        id_fields = ('note_id', 'root_comment_id', 'recipient_comment_id', 'recipient_uid', 'account_uid')
+    else:
+        required = ('note_id', 'recipient_uid', 'account_uid', 'message', 'submitted_at')
+        id_fields = ('note_id', 'recipient_uid', 'account_uid')
+        require(not intent.get('root_comment_id') and not intent.get('recipient_comment_id'),
+                'Top-level comment intent must not set reply comment IDs')
     require(all(intent.get(k) for k in required), 'Incomplete reply intent')
-    for key in ('note_id', 'root_comment_id', 'recipient_comment_id', 'recipient_uid', 'account_uid'):
+    for key in id_fields:
         require(re.fullmatch('[a-f0-9]{24}', intent[key]) is not None, 'Invalid identity')
-    require(review.get('reader') == 'codex' and review.get('reviewed') is True,
+    require(review.get('reader') in ALLOWED_READERS and review.get('reviewed') is True,
             'Actual source review required')
     require(review.get('account_verified') is True and review.get('account_uid') == intent['account_uid'],
             'Same account verification required')
-    require(review.get('note_id') == intent['note_id'] and review.get('root_comment_id') == intent['root_comment_id'],
-            'Review scope mismatch')
+    if destination == 'reply_to_comment':
+        require(review.get('note_id') == intent['note_id'] and review.get('root_comment_id') == intent['root_comment_id'],
+                'Review scope mismatch')
+    else:
+        require(review.get('note_id') == intent['note_id'], 'Review scope mismatch')
     require(bool(review.get('summary')), 'Actual reading summary required')
     submitted = stamp(intent['submitted_at'])
     observations = review.get('observations', [])
@@ -75,7 +91,8 @@ def assess(intent, review):
         refs.append({k: ref[k] for k in ('file', 'sha256', 'observed_at')})
     at, latest = max(loaded, key=lambda x: x[0])
     require(stamp(review['reviewed_at']) >= at, 'Review predates capture')
-    result = {'outcome': 'verification_incomplete', 'scope': 'current_same_account_rendered_comments',
+    result = {'outcome': 'verification_incomplete', 'destination': destination,
+              'scope': 'current_same_account_rendered_comments',
               'checked_at': at.isoformat(), 'matching_comment_ids': [], 'sources': refs,
               'resend_permitted': False, 'publication_failure_confirmed': False,
               'reason': 'Target thread or publication evidence incomplete'}
@@ -83,6 +100,35 @@ def assess(intent, review):
         result['reason'] = 'Latest source has an access or availability warning'
         return result
     rows = latest.get('results', [])
+    if destination == 'top_level_comment':
+        own_top_rows = [r for r in rows if profile_uid(r.get('authorHrefRaw')) == intent['account_uid']
+                        and not r.get('parentCommentId') and not r.get('replyToCommentId')]
+        for row in own_top_rows:
+            if row.get('commentId') and normal(row.get('text', '')) == normal(intent['message']):
+                result['matching_comment_ids'].append(row['commentId'])
+        if result['matching_comment_ids']:
+            result.update(outcome='visible_confirmed',
+                          reason='Own UID, exact top-level message and note match')
+            return result
+        if own_top_rows:
+            result['reason'] = 'Own top-level comments in target note need manual text reconciliation'
+            return result
+        coverage = latest.get('deepCoverage', {})
+        root_rows = [r for r in rows if not r.get('parentCommentId')]
+        identities_readable = all(profile_uid(r.get('authorHrefRaw')) and r.get('text') for r in root_rows)
+        threads = coverage.get('threads', [])
+        roots_captured = all(t.get('contentCaptured') is True for t in threads)
+        fully_read = bool(review.get('target_thread_fully_read') is True
+                          or review.get('root_comments_fully_read') is True)
+        fully_visible = (coverage.get('rootPaginationState') == 'complete'
+                         and coverage.get('explicitEnd') is True
+                         and identities_readable
+                         and roots_captured
+                         and not coverage.get('missingExpectedRootIds'))
+        if fully_visible and review.get('fresh_page_loaded') is True and fully_read:
+            result.update(outcome='not_visible_after_complete_check',
+                          reason='Fresh original page and full root comments read; expected own top-level comment absent. This does not prove rejection or failed delivery.')
+        return result
     target_rows = [r for r in rows if r.get('commentId') == intent['recipient_comment_id']]
     if len(target_rows) != 1 or profile_uid(target_rows[0].get('authorHrefRaw')) != intent['recipient_uid']:
         result['reason'] = 'Exact recipient comment and UID not visible'
