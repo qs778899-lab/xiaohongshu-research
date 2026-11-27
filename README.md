@@ -1,6 +1,8 @@
 # Xiaohongshu Research · 小红书深度检索
 
-面向 Codex 的只读小红书研究 skill：持续搜索分页、逐楼评论、来源定位、上下文归属、媒体待查清单、可续跑队列和可更新报告。支持 macOS + Chrome。
+面向 Codex 与 Gemini / Antigravity 的只读小红书研究 skill：持续搜索分页、逐楼评论、来源定位、上下文归属、媒体待查清单、可续跑队列和可更新报告。支持 macOS + Chrome。
+
+> **Gemini 高速异步版（`feat/gemini-version`）**：不消耗 Codex 额度、无需自研浏览器扩展，直接复用已有 Chrome OpenCLI 固定配置绑定与外部运行环境。通过 `fast_mode` 复合守卫捕获与 `xhs_gemini_pipeline.py` 实现“单账号串行稳态采集 + 多线程 Gemini Flash/Pro 异步初筛/归因/看图”，同时支持零 API Key 的 Antigravity `run_workflow` 混合批审模式。详见 [GEMINI.md](GEMINI.md) 与 [Gemini 异步高效检索指南](references/gemini-pipeline.md)。
 
 **它不是小红书官方接口，也不保证全站穷尽或无人值守完成。** 动态页面、登录、限流、删除内容和媒体读取会造成明确缺口。正文和评论由模型审读；脚本不自动断言评价对象、医疗因果或“没有负面评价”。
 

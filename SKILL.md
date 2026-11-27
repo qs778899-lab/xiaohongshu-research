@@ -17,6 +17,8 @@ description: 深入检索小红书笔记、评论、楼中楼和相关媒体，�
 
 ## 选择流程
 
+- 使用 **Antigravity / Gemini CLI / Gemini API** 进行高速异步采-审检索（零自研扩展、零 Codex 额度消耗）时，先读 [GEMINI.md](GEMINI.md) 与[Gemini 异步高效检索流水线指南](references/gemini-pipeline.md)，使用 `xhs_gemini_pipeline.py` 运行 `api-async`（多线程 Gemini Flash/Pro + 多模态并行审读）或 `agent-hybrid`（批量导出配合 Antigravity `run_workflow` 并行子代理）。既有账号锁、`STOP` 熔断、哈希溯源与覆盖缺口口径不变。
+
 - 用户要求核对报告链接能否打开时，按[原帖链接的实时核验](references/note-link-validation.md)分别记录历史对应与实时可用性；精确单帖链接错误可在原凭据内返回正常页，其他访问限制仍停止。
 
 - 指定人名的评论偏少，或要求查拼音、缩写、姓氏称谓时，使用[人物深度检索](references/person-search.md)：外部人物配置连接别名召回、在线任务和逐人覆盖。先核已执行与未完成范围；别名查询的发现目标不等于评论评价对象。

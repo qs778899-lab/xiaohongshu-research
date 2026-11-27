@@ -1,0 +1,13 @@
+interface:
+  display_name: "小红书深度检索 (Gemini 高速版)"
+  short_description: "采-审异步并行的小红书深度检索：复用 Chrome 标签页，分层调用 Gemini Flash/Pro 与原生多模态，保留可核对证据链与风控熔断"
+  default_prompt: "先读取 GEMINI.md 和 references/gemini-pipeline.md，使用 xhs_gemini_pipeline.py 对这个主题进行只读深度检索：单账号安全节奏采集的同时并行完成卡片初筛、正文/楼中楼归因与图片核验，最后输出带原帖链接、哈希出处与逐类未完成缺口的综合报告。"
+models:
+  fast_triage_and_extract: "gemini-2.5-flash"
+  deep_attribution_and_synthesis: "gemini-2.5-pro"
+  multimodal_vision: "gemini-2.5-flash"
+modes:
+  - name: "api-async"
+    description: "配置 GEMINI_API_KEY 后全自动采-审异步并行（最高吞吐）"
+  - name: "agent-hybrid"
+    description: "零额外 API Key，结合 Antigravity run_workflow 并行 flash/pro 子代理批审"

@@ -205,3 +205,6 @@ scripts/xhs_gemini_client.py
 scripts/test_gemini_client.py
 scripts/xhs_gemini_pipeline.py
 scripts/test_gemini_pipeline.py
+GEMINI.md
+agents/gemini.yaml
+references/gemini-pipeline.md
