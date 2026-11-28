@@ -395,6 +395,7 @@ export function inspectDom(opts) {
     if(!viewportReady || !laidOut(content,listingScope) || listingScope &&
         (!laidOut(selection?.scope,true) || !laidOut(selection?.scroller) ||
          !(selection.scroller.clientWidth>0 && selection.scroller.clientHeight>0)))return {error:'CONTENT_LOADING'};
+    let layoutUnsettled=false;
     if(listingScope) {
       // A positive overflow height alone does not prove the site's masonry
       // positioning has finished. Reuse the diagnostic's actual note wrappers.
@@ -418,9 +419,16 @@ export function inspectDom(opts) {
         const sameOrigin=cards.every(card=>Math.abs(card.x-cards[0].x)<=1 && Math.abs(card.y-cards[0].y)<=1);
         const stacked=right-left>=Math.min(...cards.map(card=>card.width))*.95 &&
           bottom-top>=Math.min(...cards.map(card=>card.height))*.95;
-        if(sameOrigin || stacked)return {error:'BACKGROUND_LAYOUT_UNSETTLED'};
+        if(sameOrigin || stacked) {
+          if(opts.allowUnsettledPage1===true && opts.backgroundText===true && opts.stage==='search' && !opts.guardOnly) {
+            layoutUnsettled=true;
+          } else {
+            return {error:'BACKGROUND_LAYOUT_UNSETTLED'};
+          }
+        }
       }
     }
+    opts._layoutUnsettled=layoutUnsettled;
   }
   if (opts.guardOnly) return {uid, url:location.href, visible:!document.hidden};
   const listing=opts.stage==='search' || opts.stage==='author';
@@ -459,6 +467,7 @@ export function inspectDom(opts) {
   return {url:location.href,uid,stage:opts.stage,title,body,cards,media,selected,authors,
     position,sortControls,
     endSignals:ends,explicitEnd:ends.some(s=>/^(?:-\s*THE END\s*-|没有更多了?|已显示全部|到底了)$/.test(s)),
+    ...(opts._layoutUnsettled?{layoutUnsettledPage1Only:true}:{}),
     visible:!document.hidden};
 }
 
@@ -991,7 +1000,7 @@ export function advanceDom(opts) {
   if (checked.error) return checked;
   const visible = e => !!e.getClientRects().length;
   if (opts.sort) {
-    const labels = {general:'综合',latest:'最新',popular:'最多点赞'};
+    const labels = {general:'综合',latest:'最新',popular:'最多点赞',most_commented:'最多评论'};
     const panels = [...document.querySelectorAll('.filter-container,.filter-panel')].filter(visible);
     const panel = panels[0];
     if (!panel) {
@@ -1653,7 +1662,8 @@ async function main(cfg) {
     };
     if (cfg.action==='verified_capture') {
       const args={uid:cfg.uid,stage:cfg.stage,query:cfg.query,expectedPath:cfg.expectedPath,
-        ...(cfg.backgroundText===true?{backgroundText:true}:{})};
+        ...(cfg.backgroundText===true?{backgroundText:true}:{}),
+        ...(cfg.allowUnsettledPage1===true?{allowUnsettledPage1:true}:{})};
       const data=await evaluateOnce(`(${domSource(inspectDom)})(${JSON.stringify(args)})`);
       if (!data || typeof data!=='object') throw new Error('CAPTURE_UNCONFIRMED');
       if (data.error) throw new Error(data.error);
@@ -1684,7 +1694,8 @@ async function main(cfg) {
       return await evaluateOnce(`(()=>{const c=(${domSource(inspectDom)})(${JSON.stringify(opts)});if(c.error)return c;setTimeout(()=>location.reload(),50);return {reloadSubmitted:true};})()`);
     }
     const args={uid:cfg.uid,stage:cfg.stage,query:cfg.query,expectedPath:cfg.expectedPath,
-      ...(cfg.backgroundText===true?{backgroundText:true}:{})};
+      ...(cfg.backgroundText===true?{backgroundText:true}:{}),
+      ...(cfg.allowUnsettledPage1===true?{allowUnsettledPage1:true}:{})};
     if (cfg.action==='comment_diagnose') {
       if(cfg.stage!=='body' || !/^\/(?:explore|search_result)\/[a-f0-9]{24}\/?$/.test(cfg.expectedPath||''))throw new Error('NOTE_TARGET_REQUIRED');
       return await evaluateOnce(`(()=>{const c=(${domSource(inspectDom)})(${JSON.stringify({...args,guardOnly:true})});if(c.error)return c;return {url:c.url,uid:c.uid,...(${commentStructureDom.toString()})()}})()`);

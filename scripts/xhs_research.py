@@ -468,7 +468,7 @@ def capture(run, filename, metadata, action):
 
 
 def collect_search(run, args):
-    api_sort = {"general": "general", "latest": "time_descending", "popular": "popularity_descending"}.get(args.sort)
+    api_sort = {"general": "general", "latest": "time_descending", "popular": "popularity_descending", "most_commented": "comment_descending"}.get(args.sort)
     if api_sort is None:
         raise ResearchError("Unsupported search sort")
     # Key on the actual API value so older incorrectly passed aliases are not reused.
@@ -648,7 +648,7 @@ def main():
     p.add_argument("--chrome-root", default=str(Path.home() / "Library/Application Support/Google/Chrome"))
     p = commands.add_parser("search")
     p.add_argument("query")
-    p.add_argument("--sort", choices=["general", "latest", "popular"], default="general")
+    p.add_argument("--sort", choices=["general", "latest", "popular", "most_commented"], default="general")
     p.add_argument("--pages", type=page_budget, default=2)
     p = commands.add_parser("read")
     p.add_argument("note")

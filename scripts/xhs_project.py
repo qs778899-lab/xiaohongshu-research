@@ -18,6 +18,7 @@ import xhs_search
 
 VERSION = "xiaohongshu-project-v2"
 SORTS = {"general": "general", "latest": "time_descending", "popular": "popularity_descending"}
+BROWSER_SORTS = {**SORTS, "most_commented": "comment_descending"}
 AUTO_KINDS = ("search", "note", "comments", "author", "browser")
 ATTRIBUTIONS = {"explicit", "context_supported", "insufficient", "other_target"}
 

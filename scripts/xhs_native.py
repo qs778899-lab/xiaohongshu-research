@@ -147,7 +147,7 @@ def import_manifest(project, manifest_path):
             source = Path(name)
             require(source.is_absolute() and source.is_file() and not source.is_symlink(), "Use explicit existing absolute sources")
         if unit["stage"] == "search":
-            require(unit.get("sort") in xp.SORTS, "Search sort must be explicit")
+            require(unit.get("sort") in xp.BROWSER_SORTS, "Search sort must be explicit")
         if unit["stage"] == "author":
             require(author_uid(unit["target"]), "Author target requires observed public UID; use identity for unknown UID")
         key = xp.dumps([unit["stage"], unit["target"], unit.get("sort", "")])

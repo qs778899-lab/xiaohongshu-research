@@ -39,6 +39,7 @@ function read(spec={}) {
   vm.createContext(context);vm.runInContext('const selectResults='+selectResults.toString()+';globalThis.inspect='+inspectDom.toString(),context);
   return context.inspect({uid:spec.expectedUid??uid,stage,query:stage==='author'?undefined:query,
     expectedPath:spec.expectedPath??(stage==='author'?authorPath:'/search_result/'),backgroundText:spec.backgroundText??true,
+    allowUnsettledPage1:spec.allowUnsettledPage1??false,
     guardOnly:spec.guardOnly??false});
 }
 for(const spec of [{},{zeroWrapper:true},{positions:[[0,0],[2,3],[4,5]]}]) {
@@ -70,4 +71,12 @@ for(const spec of [
 }
 assert.equal(read({stage:'author',expectedUid:'9'.repeat(24)}).error,'ACCOUNT_MISMATCH');checks++;
 assert.equal(read({stage:'author',expectedPath:'/user/profile/'+'8'.repeat(24)}).error,'TARGET_MISMATCH');checks++;
+// Opt-in page-1 fallback extracts DOM cards on search backgroundText while flagging layoutUnsettledPage1Only.
+const page1=read({allowUnsettledPage1:true});
+assert.equal(page1.error,undefined);
+assert.equal(page1.layoutUnsettledPage1Only,true);
+assert.equal(page1.cards.length,3);checks++;
+// Opt-in page-1 fallback must still reject guardOnly and author listing scopes.
+assert.equal(read({allowUnsettledPage1:true,guardOnly:true}).error,'BACKGROUND_LAYOUT_UNSETTLED');checks++;
+assert.equal(read({stage:'author',allowUnsettledPage1:true}).error,'BACKGROUND_LAYOUT_UNSETTLED');checks++;
 console.log(`PASS: ${checks} background masonry-readiness cases; no Chrome/network or CSS mutation`);

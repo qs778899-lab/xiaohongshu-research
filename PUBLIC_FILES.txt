@@ -52,6 +52,7 @@ scripts/run_tests.py
 scripts/test_account_guard.py
 scripts/test_account_state.py
 scripts/test_api_image_review.py
+scripts/test_automation_upgrades.py
 scripts/test_autonomous_work.py
 scripts/test_background_layout_capture.py
 scripts/test_background_layout_unsettled.mjs

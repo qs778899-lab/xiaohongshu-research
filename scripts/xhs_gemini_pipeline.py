@@ -491,7 +491,8 @@ def _select_sticky_task(rows: list[dict], active_note: str | None) -> dict:
 
 
 def _pick_next_collect_task(db: xp.Project, binding: dict, *, round_id: str | None,
-                            include_media: bool, active_note: str | None) -> tuple[dict | None, int]:
+                            include_media: bool, active_note: str | None,
+                            stages: set[str] | None = None) -> tuple[dict | None, int]:
     allowed = set(rounds.task_ids(db, round_id)) if round_id else None
     dispatch = native.dispatch_snapshot(db)
     allrows = [db.task(r[0], native_dispatch=dispatch) for r in db.db.execute("SELECT id FROM tasks WHERE kind='native'")]
@@ -505,6 +506,8 @@ def _pick_next_collect_task(db: xp.Project, binding: dict, *, round_id: str | No
         p = t['payload']
         stage = p.get('stage')
         if t['status'] != 'pending' or stage not in bridge.STAGES:
+            continue
+        if stages is not None and stage not in stages:
             continue
         if stage in {'images', 'video'} and not include_media:
             continue
@@ -544,6 +547,7 @@ def run_pipeline(project: Path, binding_name: str, *, research_goal: str = '',
                  max_review_backlog: int = 20, round_id: str | None = None,
                  auto_enqueue: bool = True, auto_expand_queries: bool = False,
                  max_expanded_queries: int = 0, include_media: bool = False,
+                 stages: set[str] | None = None, allow_unsettled_page1: bool = False,
                  deep_options: dict | None = None, client: gc.GeminiClient | None = None,
                  driver=None, emit=None, clock=time.monotonic, sleep=time.sleep) -> dict:
     """Run dual-track async collection + parallel Gemini review (or collect-only / review-only)."""
@@ -682,7 +686,8 @@ def run_pipeline(project: Path, binding_name: str, *, research_goal: str = '',
                     try:
                         b = bridge.load_binding(project, binding_name)
                         task, pending_reviews = _pick_next_collect_task(
-                            db, b, round_id=round_id, include_media=include_media, active_note=active_note)
+                            db, b, round_id=round_id, include_media=include_media,
+                            active_note=active_note, stages=stages)
                     finally:
                         db.close()
                 if pending_reviews >= max_review_backlog:
@@ -732,7 +737,11 @@ def run_pipeline(project: Path, binding_name: str, *, research_goal: str = '',
                                         elif (task['payload'].get('bridge') or {}).get('fault', {}).get('code') == 'PAGINATION_STALLED':
                                             r = bridge.repair_pagination(db, b, drv, task)
                                         else:
-                                            r = bridge.collect_one(db, b, drv, task, fast_mode=True, deep_options=validated_deep)
+                                            r = bridge.collect_one(
+                                                db, b, drv, task, fast_mode=True,
+                                                deep_options=validated_deep,
+                                                allow_unsettled_page1=allow_unsettled_page1,
+                                            )
                                     finally:
                                         db.close()
                             except Exception as exc:
@@ -1136,6 +1145,9 @@ def main() -> int:
     r.add_argument('--auto-expand-queries', action='store_true')
     r.add_argument('--max-expanded-queries', type=int, default=0)
     r.add_argument('--include-media', action='store_true')
+    r.add_argument('--stages', help='Optional comma-separated stage filter (e.g. search or body,roots)')
+    r.add_argument('--allow-unsettled-page1', action='store_true',
+                   help='Allow page-1 default-sort search card extraction when background masonry layout is unsettled.')
     r.add_argument('--fast-model')
     r.add_argument('--deep-model')
     r.add_argument('--vision-model')
@@ -1182,13 +1194,20 @@ def main() -> int:
             cli = gc.GeminiClient(gc.GeminiConfig.from_env(
                 fast_model=args.fast_model, deep_model=args.deep_model,
                 vision_model=args.vision_model, api_base=args.api_base))
+        stage_filter = None
+        if args.stages:
+            stage_filter = {s.strip() for s in args.stages.split(',') if s.strip()}
+            invalid = stage_filter - set(bridge.STAGES)
+            if invalid:
+                raise legacy.ResearchError(f'Invalid --stages values: {sorted(invalid)}')
         result = run_pipeline(
             args.project, args.binding, research_goal=args.research_goal, mode=args.mode,
             units=args.units, max_seconds=args.max_seconds, interval=args.interval, jitter=args.jitter,
             review_workers=args.review_workers, max_review_backlog=args.max_review_backlog,
             round_id=args.round_id, auto_enqueue=args.auto_enqueue,
             auto_expand_queries=args.auto_expand_queries, max_expanded_queries=args.max_expanded_queries,
-            include_media=args.include_media, client=cli,
+            include_media=args.include_media, stages=stage_filter,
+            allow_unsettled_page1=args.allow_unsettled_page1, client=cli,
             emit=lambda ev: print(json.dumps(ev, ensure_ascii=False), flush=True),
         )
     print(json.dumps(result, ensure_ascii=False, indent=2))

@@ -24,6 +24,7 @@ from urllib.parse import urlparse
 import xhs_account_identity as identity
 import xhs_bridge as bridge
 import xhs_project as xp
+import xhs_public_reply_check as xprc
 import xhs_research as legacy
 
 HEX_24_RE = re.compile(r'^[a-f0-9]{24}$')
@@ -199,6 +200,14 @@ def _ensure_detail_note_loaded(project: Path, binding_name: str, b: dict, driver
                                url: str, expected_path: str, *, force_reload: bool = False,
                                sleep=time.sleep) -> dict:
     meta = bridge.verify_tab(driver, b, 'detail')
+    # Select owned detail tab within its own browser window (never steals OS focus)
+    # so switching back from search tab does not leave detail hidden behind search.
+    if b['tabs']['detail'].get('owned') is True and meta.get('visible') is False:
+        selected = driver.call('activate', b, 'detail')
+        if selected.get('activated') != meta['page'] or selected.get('windowFocusRequested') is not False:
+            raise bridge.BridgeError('TARGET_RELATION_UNCONFIRMED')
+        sleep(0.3)
+        meta = bridge.verify_tab(driver, b, 'detail')
     current_path = bridge.target_path(urlparse(meta['url']).path)
     want_path = bridge.target_path(expected_path)
     if current_path != want_path:
@@ -252,29 +261,33 @@ def prepare_public_reply(project: Path, binding_name: str, intent_path: Path, *,
     project = Path(project).resolve()
     intent, digest = load_and_validate_intent(intent_path)
     dedupe = check_ledger_dedupe(ledger_path, intent['recipient_uid'])
-    with xp.project_lock(project):
-        b = bridge.load_binding(project, binding_name)
-        _require(b.get('account_uid') == intent['account_uid'], 'BINDING_ACCOUNT_MISMATCH')
-        owned_driver = driver is None
-        drv = driver or bridge.Driver(b['runtime'])
-        try:
-            with bridge.lease(project, b) as keys:
-                try:
-                    _ensure_detail_note_loaded(project, binding_name, b, drv, intent['url'],
-                                               intent['expected_path'], sleep=sleep)
-                    res = drv.call('public_reply_prepare', b, 'detail', **_reply_driver_fields(intent))
-                    if (locate_comment and intent['destination'] == 'reply_to_comment'
-                            and res.get('gap') == 'RECIPIENT_COMMENT_NOT_RENDERED'):
-                        drv.call('deep', b, 'detail', url=intent['url'],
-                                 deepRoots=40, deepReplyClicks=4, deepBudgetMs=10000)
-                        sleep(0.5)
+    def _run_prepare() -> dict:
+        with xp.project_lock(project):
+            b = bridge.load_binding(project, binding_name)
+            _require(b.get('account_uid') == intent['account_uid'], 'BINDING_ACCOUNT_MISMATCH')
+            owned_driver = driver is None
+            drv = driver or bridge.Driver(b['runtime'])
+            try:
+                with bridge.lease(project, b) as keys:
+                    try:
+                        _ensure_detail_note_loaded(project, binding_name, b, drv, intent['url'],
+                                                   intent['expected_path'], sleep=sleep)
                         res = drv.call('public_reply_prepare', b, 'detail', **_reply_driver_fields(intent))
-                except Exception as exc:
-                    bridge.save_failure(project, binding_name, b, exc, keys)
-                    raise
-        finally:
-            if owned_driver:
-                drv.close()
+                        if (locate_comment and intent['destination'] == 'reply_to_comment'
+                                and res.get('gap') == 'RECIPIENT_COMMENT_NOT_RENDERED'):
+                            drv.call('deep', b, 'detail', url=intent['url'],
+                                     deepRoots=40, deepReplyClicks=4, deepBudgetMs=10000)
+                            sleep(0.5)
+                            res = drv.call('public_reply_prepare', b, 'detail', **_reply_driver_fields(intent))
+                        return res
+                    except Exception as exc:
+                        bridge.save_failure(project, binding_name, b, exc, keys)
+                        raise
+            finally:
+                if owned_driver:
+                    drv.close()
+
+    res = bridge.retry_on_busy(_run_prepare, sleep=sleep)
     ready = bool(res.get('readyForSubmit')) and not dedupe.get('blocked')
     return {
         'ok': True,
@@ -327,7 +340,21 @@ def send_public_reply(project: Path, binding_name: str, intent_path: Path, ledge
         owned_driver = driver is None
         drv = driver or bridge.Driver(b['runtime'])
         try:
-            with bridge.lease(project, b) as keys:
+            # Acquire account lease with polite retry on transient cross-account lock collisions
+            # strictly BEFORE any preflight or DOM click is attempted.
+            lease_ctx = None
+            keys = None
+            for _attempt in range(10):
+                lease_ctx = bridge.lease(project, b)
+                try:
+                    keys = lease_ctx.__enter__()
+                    break
+                except legacy.CollectionBusy:
+                    lease_ctx = None
+                    if _attempt >= 9:
+                        raise
+                    sleep(1.5)
+            try:
                 try:
                     _ensure_detail_note_loaded(project, binding_name, b, drv, intent['url'],
                                                intent['expected_path'], sleep=sleep)
@@ -380,13 +407,15 @@ def send_public_reply(project: Path, binding_name: str, intent_path: Path, ledge
                     raise
 
                 if res.get('sendClicked') is False:
+                    occluded = res.get('gap') == 'COMPOSER_DID_NOT_OPEN' and res.get('visible') is False
                     abort_rec = dict(dispatch_record, status='aborted_before_click',
                                      aborted_at=legacy.now(), send_clicked=False,
-                                     never_resend=False, driver_result=res)
+                                     never_resend=False, driver_result=res,
+                                     **({'window_occluded': True} if occluded else {}))
                     legacy.write_json(rec_path, abort_rec)
                     legacy.write_json(int_path, abort_rec)
                     _append_jsonl(root / 'journal.jsonl', abort_rec)
-                    return {
+                    out_payload = {
                         'ok': False,
                         'action': 'send',
                         'status': 'aborted_before_click',
@@ -395,6 +424,13 @@ def send_public_reply(project: Path, binding_name: str, intent_path: Path, ledge
                         'driver_result': res,
                         'intent_sha256': digest,
                     }
+                    if occluded:
+                        out_payload['window_occluded'] = True
+                        out_payload['remediation_hint'] = (
+                            'Owned detail tab is active but its OS browser window is occluded (document.hidden=true). '
+                            'Expose the window or launch Chrome with --disable-features=CalculateNativeWinOcclusion.'
+                        )
+                    return out_payload
 
                 if res.get('captchaObserved') is True:
                     stop_rec = dict(dispatch_record, status='access_stop_after_send_attempt',
@@ -436,60 +472,105 @@ def send_public_reply(project: Path, binding_name: str, intent_path: Path, ledge
                     'verification_required': True,
                     'driver_result': res,
                 }
+            finally:
+                if lease_ctx is not None:
+                    lease_ctx.__exit__(*sys.exc_info())
         finally:
             if owned_driver:
                 drv.close()
 
 
+def _matching_own_comment_present(intent: dict, rows: list[dict]) -> bool:
+    want_uid = intent['account_uid']
+    want_msg = xprc.normal(intent['message'])
+    dest = intent['destination']
+    if dest == 'top_level_comment':
+        return any(
+            xprc.profile_uid(r.get('authorHrefRaw')) == want_uid
+            and not r.get('parentCommentId') and not r.get('replyToCommentId')
+            and r.get('commentId') and xprc.normal(r.get('text', '')) == want_msg
+            for r in rows
+        )
+    want_root = intent['root_comment_id']
+    want_name = intent.get('recipient_name') or ''
+    return any(
+        xprc.profile_uid(r.get('authorHrefRaw')) == want_uid
+        and r.get('parentCommentId') == want_root and r.get('commentId')
+        and xprc.normal(xprc.reply_text(r, want_name)) == want_msg
+        for r in rows
+    )
+
+
 def capture_verification_snapshot(project: Path, binding_name: str, intent_path: Path,
                                   output_capture: Path, *, reload_page: bool = True,
-                                  max_passes: int = 3, driver=None, sleep=time.sleep) -> dict:
+                                  max_passes: int = 3, use_comment_progress: bool = True,
+                                  driver=None, sleep=time.sleep) -> dict:
     """Capture a fresh read-only post-send comment snapshot for xhs_public_reply_check.py."""
     project = Path(project).resolve()
     out = Path(output_capture).resolve()
     legacy.research_path(out)
     _require(not out.exists(), 'OUTPUT_ALREADY_EXISTS', str(out))
     intent, digest = load_and_validate_intent(intent_path)
-    _require(1 <= max_passes <= 8, 'INVALID_MAX_PASSES')
+    _require(1 <= max_passes <= 12, 'INVALID_MAX_PASSES')
 
-    with xp.project_lock(project):
-        b = bridge.load_binding(project, binding_name)
-        _require(b.get('account_uid') == intent['account_uid'], 'BINDING_ACCOUNT_MISMATCH')
-        owned_driver = driver is None
-        drv = driver or bridge.Driver(b['runtime'])
-        try:
-            with bridge.lease(project, b) as keys:
-                try:
-                    _ensure_detail_note_loaded(project, binding_name, b, drv, intent['url'],
-                                               intent['expected_path'], force_reload=reload_page, sleep=sleep)
-                    progress = {}
-                    latest_data = None
-                    for idx in range(max_passes):
-                        data = drv.call('deep', b, 'detail', url=intent['url'], progress=progress,
-                                        deepRoots=50, deepReplyClicks=5, deepBudgetMs=14000)
-                        latest_data = data
-                        cov = data.get('deepCoverage') or {}
-                        # Stop early if our own matching comment is already visible OR full pagination ended.
-                        own_visible = any(
-                            intent['account_uid'] in str(r.get('authorHrefRaw') or '').lower()
-                            for r in (data.get('results') or [])
-                        )
-                        if own_visible or (cov.get('rootPaginationState') == 'complete'
-                                           and cov.get('explicitEnd') is True
-                                           and not cov.get('remainingThreads')):
-                            break
-                        if idx < max_passes - 1:
-                            progress = {'observedRootIds': cov.get('observedRootIds') or []}
-                            sleep(1.5)
-                except Exception as exc:
-                    bridge.save_failure(project, binding_name, b, exc, keys)
-                    raise
-        finally:
-            if owned_driver:
-                drv.close()
+    def _run_capture() -> tuple[dict | None, list[dict]]:
+        with xp.project_lock(project):
+            b = bridge.load_binding(project, binding_name)
+            _require(b.get('account_uid') == intent['account_uid'], 'BINDING_ACCOUNT_MISMATCH')
+            owned_driver = driver is None
+            drv = driver or bridge.Driver(b['runtime'])
+            try:
+                with bridge.lease(project, b) as keys:
+                    try:
+                        _ensure_detail_note_loaded(project, binding_name, b, drv, intent['url'],
+                                                   intent['expected_path'], force_reload=reload_page, sleep=sleep)
+                        progress: dict = {}
+                        is_top = intent['destination'] == 'top_level_comment'
+                        if use_comment_progress and is_top:
+                            shared_prog = project / 'bridge' / 'comment-progress' / f"{intent['note_id']}.json"
+                            if shared_prog.is_file() and not shared_prog.is_symlink():
+                                prior = legacy.read_json(shared_prog, {})
+                                if isinstance(prior, dict) and prior:
+                                    progress = dict(prior)
+                                    progress.pop('rootRepairProbe', None)
+                                    progress.pop('discoveredReplyScope', None)
+                        reply_clicks = 1 if is_top else 5
+                        latest_data = None
+                        merged_by_key: dict[str, dict] = {}
+                        observed_roots: list[str] = list(progress.get('observedRootIds') or [])
+                        for idx in range(max_passes):
+                            data = drv.call('deep', b, 'detail', url=intent['url'], progress=progress,
+                                            deepRoots=50, deepReplyClicks=reply_clicks, deepBudgetMs=14000)
+                            latest_data = data
+                            for r in (data.get('results') or []):
+                                key = str(r.get('commentId') or f"{r.get('authorHrefRaw')}:{str(r.get('text') or '')[:32]}")
+                                merged_by_key[key] = r
+                            cov = data.get('deepCoverage') or {}
+                            for rid in (cov.get('observedRootIds') or []):
+                                if rid not in observed_roots:
+                                    observed_roots.append(rid)
+                            merged_rows = list(merged_by_key.values())
+                            if (_matching_own_comment_present(intent, merged_rows)
+                                    or (cov.get('rootPaginationState') == 'complete'
+                                        and cov.get('explicitEnd') is True
+                                        and not cov.get('remainingThreads'))):
+                                break
+                            if idx < max_passes - 1:
+                                if not (use_comment_progress and is_top and 'threads' in progress):
+                                    progress = {'observedRootIds': list(observed_roots)}
+                                sleep(1.2)
+                        return latest_data, list(merged_by_key.values())
+                    except Exception as exc:
+                        bridge.save_failure(project, binding_name, b, exc, keys)
+                        raise
+            finally:
+                if owned_driver:
+                    drv.close()
 
+    latest_data, merged_rows = bridge.retry_on_busy(_run_capture, sleep=sleep)
     _require(isinstance(latest_data, dict), 'VERIFICATION_CAPTURE_EMPTY')
     payload = dict(latest_data)
+    payload['results'] = merged_rows
     payload.setdefault('url', intent['url'])
     observed_at = legacy.now()
     out.parent.mkdir(parents=True, exist_ok=True, mode=0o700)

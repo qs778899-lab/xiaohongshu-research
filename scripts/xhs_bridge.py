@@ -28,6 +28,18 @@ import xhs_account_identity as identity
 
 VERSION = 'xhs-bridge-v1'
 STAGES = {'search', 'body', 'roots', 'replies', 'author', 'images', 'video'}
+SORT_LABELS = {'general': '综合', 'latest': '最新', 'popular': '最多点赞', 'most_commented': '最多评论'}
+
+
+def retry_on_busy(fn, *, max_attempts=10, wait_seconds=1.5, sleep=time.sleep):
+    """Politely retry transient cross-account identity-lock collisions (never post-click writes)."""
+    for attempt in range(max(1, int(max_attempts))):
+        try:
+            return fn()
+        except legacy.CollectionBusy:
+            if attempt >= max_attempts - 1:
+                raise
+            sleep(wait_seconds)
 
 
 class BridgeError(legacy.ResearchError):
@@ -736,69 +748,78 @@ def restore_owned_home(project,name,b,driver,role):
 
 
 def recover(project,name,release=False):
-    b=load_binding(project,name);driver=Driver(b['runtime'])
-    with lease(project,b) as keys:
+    def _once():
+        b=load_binding(project,name);driver=Driver(b['runtime'])
         try:
-            profiles=connected_profiles(driver)
-            match=[p for p in profiles if p['contextId']==b['context_id']]
-            if len(match)!=1: raise BridgeError('SPECIFIED_PROFILE_OFFLINE')
-            if match[0].get('extensionVersion')!=effective_extension_version(b): raise BridgeError('EXTENSION_CHANGED_RECHECK_REQUIRED')
-            if not release:
-                for role in ('search','detail'):recover_owned_role(project,name,b,driver,role)
-            for role in b['tabs']:
-                try:verify_tab(driver,b,role)
-                except BridgeError as exc:
-                    if exc.code!='UNEXPECTED_TARGET_CHANGE' or release:raise
-                    restore_owned_home(project,name,b,driver,role)
-                if release and b['tabs'][role].get('owned'):
-                    driver.call('close',b,role)
-                    b['tabs'][role]['released']=True
+            with lease(project,b) as keys:
+                try:
+                    profiles=connected_profiles(driver)
+                    match=[p for p in profiles if p['contextId']==b['context_id']]
+                    if len(match)!=1: raise BridgeError('SPECIFIED_PROFILE_OFFLINE')
+                    if match[0].get('extensionVersion')!=effective_extension_version(b): raise BridgeError('EXTENSION_CHANGED_RECHECK_REQUIRED')
+                    if not release:
+                        for role in ('search','detail'):recover_owned_role(project,name,b,driver,role)
+                    for role in b['tabs']:
+                        try:verify_tab(driver,b,role)
+                        except BridgeError as exc:
+                            if exc.code!='UNEXPECTED_TARGET_CHANGE' or release:raise
+                            restore_owned_home(project,name,b,driver,role)
+                        if release and b['tabs'][role].get('owned'):
+                            driver.call('close',b,role)
+                            b['tabs'][role]['released']=True
+                            save_binding(project,name,b)
+                    b['state']='released' if release else 'ready';b.pop('last_error',None)
                     save_binding(project,name,b)
-            b['state']='released' if release else 'ready';b.pop('last_error',None)
-            save_binding(project,name,b)
-        except Exception as exc:
-            save_failure(project,name,b,exc,keys);raise
-    return {'state':b['state'],'tabs':b['tabs']}
+                except Exception as exc:
+                    save_failure(project,name,b,exc,keys);raise
+            return {'state':b['state'],'tabs':b['tabs']}
+        finally:
+            driver.close()
+    return retry_on_busy(_once)
 
 
 def text_mode(project,name,mode):
     """Persist one explicit collection-mode flag under the original account lease."""
     if mode not in ('background','foreground'):raise BridgeError('TEXT_MODE_REQUIRED')
     project=Path(project).resolve()
-    with xp.project_lock(project):
-        b=load_binding(project,name)
-        with lease(project,b):
-            b['background_text_collection']=mode=='background'
-            save_binding(project,name,b)
-    return {'binding':name,'mode':mode,'background_text_collection':b['background_text_collection']}
+    def _once():
+        with xp.project_lock(project):
+            b=load_binding(project,name)
+            with lease(project,b):
+                b['background_text_collection']=mode=='background'
+                save_binding(project,name,b)
+        return {'binding':name,'mode':mode,'background_text_collection':b['background_text_collection']}
+    return retry_on_busy(_once)
 
 
 def window_state(project,name,role):
     """Read one registered role's native window; never prepare or activate it."""
     if role not in {'search','detail'}:raise BridgeError('ROLE_REQUIRED')
     project=Path(project).resolve()
-    with xp.project_lock(project):
-        b=load_binding(project,name);driver=Driver(b['runtime'])
-        try:
-            with lease(project,b) as keys:
-                try:
-                    before=verify_tab(driver,b,role)
-                    observed=driver.call('registered_window_state',b,role)
-                    after=verify_tab(driver,b,role)
-                    if not isinstance(observed,dict):raise BridgeError('WINDOW_STATE_UNCONFIRMED')
-                    if observed.get('page')!=before['page'] or after['page']!=before['page']:
-                        raise BridgeError('TARGET_MISMATCH')
-                    if observed.get('uid')!=b['account_uid']:raise BridgeError('ACCOUNT_MISMATCH')
-                    if observed.get('url')!=before['url'] or after['url']!=before['url']:
-                        raise BridgeError('UNEXPECTED_TARGET_CHANGE')
-                    if (observed.get('readOnly') is not True or observed.get('targetVerified') is not True
-                            or observed.get('windowFocusRequested') is not False
-                            or observed.get('windowRestoreRequested') is not False):
-                        raise BridgeError('WINDOW_STATE_UNCONFIRMED')
-                    return dict(observed,binding=name,role=role)
-                except Exception as exc:
-                    save_failure(project,name,b,exc,keys);raise
-        finally:driver.close()
+    def _once():
+        with xp.project_lock(project):
+            b=load_binding(project,name);driver=Driver(b['runtime'])
+            try:
+                with lease(project,b) as keys:
+                    try:
+                        before=verify_tab(driver,b,role)
+                        observed=driver.call('registered_window_state',b,role)
+                        after=verify_tab(driver,b,role)
+                        if not isinstance(observed,dict):raise BridgeError('WINDOW_STATE_UNCONFIRMED')
+                        if observed.get('page')!=before['page'] or after['page']!=before['page']:
+                            raise BridgeError('TARGET_MISMATCH')
+                        if observed.get('uid')!=b['account_uid']:raise BridgeError('ACCOUNT_MISMATCH')
+                        if observed.get('url')!=before['url'] or after['url']!=before['url']:
+                            raise BridgeError('UNEXPECTED_TARGET_CHANGE')
+                        if (observed.get('readOnly') is not True or observed.get('targetVerified') is not True
+                                or observed.get('windowFocusRequested') is not False
+                                or observed.get('windowRestoreRequested') is not False):
+                            raise BridgeError('WINDOW_STATE_UNCONFIRMED')
+                        return dict(observed,binding=name,role=role)
+                    except Exception as exc:
+                        save_failure(project,name,b,exc,keys);raise
+            finally:driver.close()
+    return retry_on_busy(_once)
 
 
 def exact_target_observed_urls(data,stage,target,source_sha256=None):
@@ -1491,7 +1512,7 @@ def fast_verify_and_capture(project,b,driver,task):
     return url,role,args,data
 
 
-def collect_one(project,b,driver,task,force_advance=False,*,root_repair_probe=None,discovered_reply_probe=None,fast_mode=False,deep_options=None):
+def collect_one(project,b,driver,task,force_advance=False,*,root_repair_probe=None,discovered_reply_probe=None,fast_mode=False,deep_options=None,allow_unsettled_page1=False):
     p=task['payload'];stage=p['stage']
     reply_marker=discovered_reply_probe or active_discovered_reply_scope(project,task)
     if reply_marker is not None:
@@ -1546,26 +1567,42 @@ def collect_one(project,b,driver,task,force_advance=False,*,root_repair_probe=No
                 thread['state']='visible_replies_read'
                 thread['prior_capture_source']=old.get('last_snapshot','')
     else:
+        unsettled_page1=False
+        can_fallback_page1=(allow_unsettled_page1 and stage=='search' and p.get('sort')=='general'
+                            and args.get('backgroundText') is True and not p.get('bridge',{}).get('hashes'))
         if data is None:
-            data=ready_capture(project,b,driver,role,args,fast_mode=fast_mode)
-        if stage=='search':
-            label={'general':'综合','latest':'最新','popular':'最多点赞'}[p['sort']]
-            if label not in data.get('selected',[]):
-                for attempt in range(2):
-                    action=driver.call('advance',b,role,sort=p['sort'],**args)
-                    time.sleep(1)
-                    data=ready_capture(project,b,driver,role,args,fast_mode=fast_mode)
-                    if label in data.get('selected',[]) or action.get('action')=='sort_clicked':break
-                if label not in data.get('selected',[]):raise BridgeError('SORT_UNCONFIRMED')
-            verified_sort={'label':label,'url':data['url'],'at':legacy.now(),
-                           'selected_before_close':list(data.get('selected',[])),
-                           'verified_before_close':True}
-            dismissed=driver.call('advance',b,role,dismissFilters=True,**args)
-            if not (fast_mode and isinstance(dismissed,dict) and dismissed.get('action')=='filter_already_closed'):
-                time.sleep(0.4 if fast_mode else 1)
+            try:
                 data=ready_capture(project,b,driver,role,args,fast_mode=fast_mode)
-            data['sortVerification']=verified_sort
-        if stage in {'search','author'}:
+            except BridgeError as exc:
+                if exc.code!='BACKGROUND_LAYOUT_UNSETTLED' or not can_fallback_page1:raise
+                data=driver.call('capture',b,role,allowUnsettledPage1=True,**args)
+                if not isinstance(data,dict) or not data.get('cards'):raise
+                unsettled_page1=bool(data.get('layoutUnsettledPage1Only'))
+        if stage=='search':
+            label=SORT_LABELS[p['sort']]
+            if unsettled_page1:
+                verified_sort={'label':label,'url':data['url'],'at':legacy.now(),
+                               'selected_before_close':list(data.get('selected',[])),
+                               'verified_before_close':False,
+                               'default_general_unsettled_page1':True}
+                data['sortVerification']=verified_sort
+            else:
+                if label not in data.get('selected',[]):
+                    for attempt in range(2):
+                        action=driver.call('advance',b,role,sort=p['sort'],**args)
+                        time.sleep(1)
+                        data=ready_capture(project,b,driver,role,args,fast_mode=fast_mode)
+                        if label in data.get('selected',[]) or action.get('action')=='sort_clicked':break
+                    if label not in data.get('selected',[]):raise BridgeError('SORT_UNCONFIRMED')
+                verified_sort={'label':label,'url':data['url'],'at':legacy.now(),
+                               'selected_before_close':list(data.get('selected',[])),
+                               'verified_before_close':True}
+                dismissed=driver.call('advance',b,role,dismissFilters=True,**args)
+                if not (fast_mode and isinstance(dismissed,dict) and dismissed.get('action')=='filter_already_closed'):
+                    time.sleep(0.4 if fast_mode else 1)
+                    data=ready_capture(project,b,driver,role,args,fast_mode=fast_mode)
+                data['sortVerification']=verified_sort
+        if stage in {'search','author'} and not unsettled_page1:
             previous_top=p.get('bridge',{}).get('cursor',{}).get('scrollTop',0)
             # Restore only a recorded position; lazy loading can clamp it. Each
             # attempt captures the actually rendered intermediate page before
@@ -1608,7 +1645,7 @@ def collect_one(project,b,driver,task,force_advance=False,*,root_repair_probe=No
     if stage in {'roots','replies'}:
         from xhs_browser import merge_browser_progress
         legacy.write_json(shared,merge_browser_progress(prior,{'coverage':data.get('deepCoverage',{}),'data':data.get('results',[])},result['snapshot']))
-    if stage in {'search','author'} and (force_advance or not result['awaiting_review']):
+    if stage in {'search','author'} and not data.get('layoutUnsettledPage1Only') and (force_advance or not result['awaiting_review']):
         # Cards can precede layout. Capture the post-scroll state before another
         # task navigates this shared role, preserving both discoveries and cursor.
         time.sleep(0.4 if fast_mode else 2)
@@ -2180,7 +2217,7 @@ def repair_pagination(project,b,driver,task):
         project.db.execute('UPDATE tasks SET payload=? WHERE id=?',(xp.dumps(p),task['id']));project.db.commit()
         driver.call(action,b,role);time.sleep(1)
         if p['stage']=='search':
-            label={'general':'综合','latest':'最新','popular':'最多点赞'}[p['sort']]
+            label=SORT_LABELS[p['sort']]
             check=ready_capture(project,b,driver,role,args)
             if label not in check.get('selected',[]):
                 for attempt in range(2):
