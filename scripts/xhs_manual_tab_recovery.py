@@ -17,6 +17,8 @@ import xhs_project as xp
 
 KIND = 'manual_public_web_tab_probe_v1'
 GRANT_KIND = 'manual_restored_current_public_web_v1'
+ALLOWED_READERS = ('codex', 'gemini')
+RENDER_WAIT_POLLS = 6
 AUTHORITY = ('format','project','binding_name','profile_label','context_id','account_uid',
              'profile_guard_key','session','runtime','extension_version','authorization',
              'transport_surface','manual_single_tab')
@@ -34,7 +36,12 @@ def check_pointer(ref):
 
 def note_id(url):
     bridge.safe_url(url)
-    m=re.fullmatch(r'/(?:explore|search_result)/([a-f0-9]{24})/?',urlparse(url).path)
+    m=re.fullmatch(r'/(?:explore|search_result|user/profile/[a-f0-9]{24})/([a-f0-9]{24})/?',urlparse(url).path)
+    return m[1] if m else None
+
+def profile_id(url):
+    bridge.safe_url(url)
+    m=re.fullmatch(r'/user/profile/([a-f0-9]{24})/?',urlparse(url).path)
     return m[1] if m else None
 
 def excluded_notes(parent):
@@ -56,11 +63,16 @@ def active_metadata(value):
     return t
 
 def proof_args(url):
+    bridge.safe_url(url)
     parsed=urlparse(url)
     if parsed.path.rstrip('/')=='/explore':
+        nr.require(parse_qs(parsed.query,keep_blank_values=True).get('source')!=['404'],
+                   'MANUAL_HOME_SOURCE404_REJECTED')
         return {'stage':'home','backgroundText':True}
     if note_id(url):
         return {'stage':'body','expectedPath':'/explore/'+note_id(url),'backgroundText':True}
+    if profile_id(url):
+        return {'stage':'author','expectedPath':'/user/profile/'+profile_id(url),'backgroundText':True}
     query=parse_qs(parsed.query).get('keyword',[])
     nr.require(parsed.path.rstrip('/') in {'/search_result','/search_result_ai'} and len(query)==1,'MANUAL_NOTE_OR_SEARCH_REQUIRED')
     return {'stage':'search','expectedPath':parsed.path.rstrip('/'),'query':query[0],'backgroundText':True}
@@ -70,7 +82,9 @@ def require_capture(data,b,args):
     nr.require(data.get('uid')==b['account_uid'],'ACCOUNT_MISMATCH')
     actual=proof_args(data.get('url',''))
     nr.require(actual==args,'MANUAL_CAPTURE_TARGET_CHANGED')
-    if args['stage']=='home':
+    if args['stage'] in {'home','author'}:
+        nr.require(not any(data.get(k) for k in ('loginWall','securityBlock','notFound','loading')),
+                   'MANUAL_CAPTURE_FAILED')
         return
     if args['stage']=='search':
         nr.require(bool(data.get('cards')),'MANUAL_SEARCH_CONTENT_REQUIRED')
@@ -167,7 +181,7 @@ def inspect(project,parent_name,metadata_file,user_file,parent_project=None):
             ident=driver.call('identity',b,'detail')
             evidence(root/'identity.json',ident)
             nr.require(ident.get('uid')==b['account_uid'] and ident.get('url')==target['url'],'MANUAL_IDENTITY_CHANGED')
-            capture=ident if args['stage']=='home' else driver.call('capture',b,'detail',**args)
+            capture=ident if args['stage'] in {'home','author'} else driver.call('capture',b,'detail',**args)
             capture_ref=evidence(root/'loaded-page.json',capture)
             require_capture(capture,b,args)
             nr.require(nr.current_stops(keys)==stops,'MANUAL_STOP_CHANGED')
@@ -254,7 +268,7 @@ def finish_inspection(attempt_file, verify_focus=False):
             for slot in b['tabs'].values():slot['page']=adopted['page']
             ident=driver.call('identity',b,'detail');evidence(root/'identity.json',ident)
             nr.require(ident.get('uid')==b['account_uid'] and ident.get('url')==target['url'],'MANUAL_IDENTITY_CHANGED')
-            capture=ident if args['stage']=='home' else driver.call('capture',b,'detail',**args)
+            capture=ident if args['stage'] in {'home','author'} else driver.call('capture',b,'detail',**args)
             capture_ref=evidence(root/'loaded-page.json',capture);require_capture(capture,b,args)
             nr.require(nr.current_stops(keys)==attempt['stops'],'MANUAL_STOP_CHANGED')
             nr.require(bridge.load_binding(source_project,parent['binding_name'])==parent,'MANUAL_PARENT_CHANGED')
@@ -330,7 +344,7 @@ def probe_search(inspection_file,task_id):
     inspected,_=nr.read_json(inspection_file)
     attempt=check_pointer(inspected['attempt']);loaded=check_pointer(inspected['capture'])
     loaded_args=proof_args(loaded['url'])
-    nr.require(loaded_args['stage'] in {'home','body'},'MANUAL_HOME_OR_BODY_INSPECTION_REQUIRED')
+    nr.require(loaded_args['stage'] in {'home','body','author'},'MANUAL_HOME_OR_BODY_INSPECTION_REQUIRED')
     require_capture(loaded,inspected['binding'],loaded_args)
     b=inspected['binding'];root=Path(inspection_file).parent
     db=xp.Project(b['project'])
@@ -351,7 +365,7 @@ def probe_search(inspection_file,task_id):
             nr.require(ident.get('uid')==b['account_uid'],'MANUAL_IDENTITY_CHANGED')
             evidence(root/'search-navigation.json',driver.call('navigate',b,'detail',url=url))
             time.sleep(1)
-            for index in range(3):
+            for index in range(RENDER_WAIT_POLLS):
                 meta=driver.call('metadata',b,'detail');evidence(root/f'search-metadata-{index}.json',meta)
                 nr.require(meta.get('page')==b['tabs']['detail']['page'],'MANUAL_PAGE_CHANGED')
                 nr.require(proof_args(meta['url'])==args,'MANUAL_QUERY_CHANGED')
@@ -361,7 +375,7 @@ def probe_search(inspection_file,task_id):
                     require_capture(captured,b,args)
                     break
                 except bridge.BridgeError as exc:
-                    if exc.code not in {'CONTENT_LOADING','BACKGROUND_LAYOUT_UNSETTLED'} or index==2:raise
+                    if exc.code not in {'CONTENT_LOADING','BACKGROUND_LAYOUT_UNSETTLED'} or index==RENDER_WAIT_POLLS-1:raise
                     time.sleep(1)
             nr.require(nr.current_stops(keys)==attempt['stops'],'MANUAL_STOP_CHANGED')
             b['tabs']['detail']['last_url']=captured['url'];b['tabs']['search']=b['tabs']['detail']
@@ -434,7 +448,7 @@ def probe_note(inspection_file,url,resume_before_navigation=False):
             time.sleep(1)
             args=proof_args(url)
             capture=None
-            for index in range(3):
+            for index in range(RENDER_WAIT_POLLS):
                 meta=driver.call('metadata',b,'detail')
                 evidence(root/f'note-metadata-{index}.json',meta)
                 nr.require(meta.get('page')==b['tabs']['detail']['page'],'MANUAL_PAGE_CHANGED')
@@ -445,7 +459,7 @@ def probe_note(inspection_file,url,resume_before_navigation=False):
                     require_capture(capture,b,args)
                     break
                 except bridge.BridgeError as exc:
-                    if exc.code not in {'CONTENT_LOADING','BACKGROUND_LAYOUT_UNSETTLED'} or index==2:raise
+                    if exc.code not in {'CONTENT_LOADING','BACKGROUND_LAYOUT_UNSETTLED'} or index==RENDER_WAIT_POLLS-1:raise
                     time.sleep(1)
             nr.require(nr.current_stops(keys)==attempt['stops'],'MANUAL_STOP_CHANGED')
             b['tabs']['detail']['last_url']=capture['url']
@@ -479,7 +493,7 @@ def finish_search(inspection_file,layout_observation=None):
     observation_ref=None
     if local_layout:
         observed,_=nr.read_json(layout_observation)
-        nr.require(observed.get('reader')=='codex' and observed.get('account_uid')==b['account_uid']
+        nr.require(observed.get('reader') in ALLOWED_READERS and observed.get('account_uid')==b['account_uid']
                    and observed.get('normal_search_visible') is True and observed.get('no_access_warning') is True
                    and observed.get('window_restored') is True and bool(observed.get('summary')),
                    'MANUAL_LAYOUT_OBSERVATION_REQUIRED')
@@ -541,7 +555,7 @@ def verified_search_context(inspection_file, user, refs=None):
                and reserved.get('parent_project')==attempt.get('parent_project',attempt['project']),
                'MANUAL_ATTEMPT_RESERVATION_CHANGED')
     loaded=check_pointer(inspected['capture']);args=proof_args(loaded['url'])
-    nr.require(args['stage']=='home','MANUAL_HOME_INSPECTION_REQUIRED');require_capture(loaded,b,args)
+    nr.require(args['stage'] in {'home','author'},'MANUAL_HOME_INSPECTION_REQUIRED');require_capture(loaded,b,args)
     names={'failure':'search-failure.json','navigation':'search-navigation.json',
            'previous_metadata':'search-metadata-0.json','search_attempt':'search-attempt.json'}
     actual_refs={key:pointer(root/name) for key,name in names.items()}
@@ -779,7 +793,7 @@ def validated_probe(probe_ref):
     return probe,attempt,capture
 
 def validate_review(review,probe):
-    nr.require(review.get('reader')=='codex' and review.get('reviewed') is True and review.get('body_read') is True,
+    nr.require(review.get('reader') in ALLOWED_READERS and review.get('reviewed') is True and review.get('body_read') is True,
                'MANUAL_ACTUAL_CODEX_REVIEW_REQUIRED')
     nr.require(review.get('capture_sha256')==probe['capture']['sha256'] and bool(review.get('summary')),
                'MANUAL_REVIEW_SOURCE_CHANGED')

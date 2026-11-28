@@ -747,4 +747,89 @@ class ManualTabTests(unittest.TestCase):
         with self.assertRaisesRegex(bridge.BridgeError,'MANUAL_AUTHORITY_CHANGED'):
             m.recheck(self.p,'manual')
 
+    def test_author_profile_is_identity_only_and_cannot_validate_research_access_alone(self):
+        author_url='https://www.xiaohongshu.com/user/profile/'+'5'*24+'?xsec_token=synthetic&xsec_source=pc_user'
+        self.url=author_url
+        self.put('meta.json',{'tabId':11,'windowId':22,'url':author_url,'active':True})
+        before=self.stop.read_bytes()
+        result=self.run_inspect()
+        self.assertFalse(result['collection_permitted'])
+        self.assertNotIn('capture',self.calls)
+        self.assertEqual(before,self.stop.read_bytes())
+        self.assertEqual(m.proof_args(author_url),
+                         {'stage':'author','expectedPath':'/user/profile/'+'5'*24,'backgroundText':True})
+        with self.assertRaises(bridge.BridgeError):
+            m.probe_note(result['inspection'],'https://www.xiaohongshu.com/explore/'+'3'*24)
+
+    def test_author_profile_inspection_starts_bounded_search_and_attests_with_gemini_reader(self):
+        author_url='https://www.xiaohongshu.com/user/profile/'+'5'*24
+        self.url=author_url
+        self.put('meta.json',{'tabId':11,'windowId':22,'url':author_url,'active':True})
+        inspected=self.run_inspect()['inspection']
+        note_url='https://www.xiaohongshu.com/explore/'+'6'*24
+        case=self
+        class Driver:
+            url=author_url
+            def __init__(self,*args):pass
+            def close(self):pass
+            def call(self,action,b=None,role=None,**kw):
+                case.calls.append(action)
+                if action=='metadata':return {'url':self.url,'page':'A'*32}
+                if action=='identity':return {'uid':case.identity_uid,'url':self.url,'page':'A'*32}
+                if action=='navigate':Driver.url=kw['url'];return {'url':Driver.url,'navigationSubmitted':True}
+                if action=='capture':
+                    if kw['stage']=='search':
+                        return {'uid':case.uid,'url':self.url,'cards':[{'url':note_url,'text':'Synthetic card'}]}
+                    return {'uid':case.uid,'url':self.url,'stage':'body','title':'Synthetic post',
+                            'body':'Normal narrative','authors':[{'name':'Author','url':'https://www.xiaohongshu.com/user/profile/'+'8'*24}]}
+                raise AssertionError(action)
+        class Project:
+            def __init__(self,*args):pass
+            def task(self,*args):return {'kind':'native','payload':{'stage':'search'}}
+            def close(self):pass
+        with self.mocks(),patch.object(bridge,'Driver',Driver),patch.object(xp,'Project',Project),\
+             patch.object(bridge,'observed_url',return_value='https://www.xiaohongshu.com/search_result?keyword=test'),\
+             patch.object(m.time,'sleep'):
+            searched=m.probe_search(inspected,'existing')
+            self.assertFalse(searched['collection_permitted'])
+            with self.assertRaisesRegex(bridge.BridgeError,'ALREADY_ATTEMPTED'):
+                m.probe_search(inspected,'existing')
+            probed=m.probe_note(searched['inspection'],note_url)
+            self.assertFalse(probed['collection_permitted'])
+            review=self.put('gemini-review.json',{'reader':'gemini','reviewed':True,'body_read':True,
+                'capture_sha256':probed['capture']['sha256'],'summary':'Read title, author and body.',
+                'positions':['/title','/body','/authors'],'comments_read':False,'media_read':False})
+            granted=m.attest(probed['probe'],review,'author-to-gemini')
+        self.assertEqual(granted['state'],'ready');self.assertTrue(granted['stops_unchanged'])
+        self.assertEqual(granted['scope'],'rendered_public_web_only')
+
+    def test_author_profile_and_home_reject_source404_invalid_profile_and_access_walls(self):
+        with self.assertRaisesRegex(bridge.BridgeError,'SOURCE404'):
+            m.proof_args('https://www.xiaohongshu.com/explore?source=404')
+        with self.assertRaises(bridge.BridgeError):
+            m.proof_args('https://www.xiaohongshu.com/user/profile/not-hex')
+        author_url='https://www.xiaohongshu.com/user/profile/'+'5'*24
+        args=m.proof_args(author_url)
+        b={'account_uid':self.uid}
+        for bad in [{'loginWall':True},{'securityBlock':True},{'notFound':True},{'loading':True}]:
+            with self.subTest(bad=bad),self.assertRaisesRegex(bridge.BridgeError,'CAPTURE_FAILED'):
+                m.require_capture({'uid':self.uid,'url':author_url,**bad},b,args)
+
+    def test_profile_qualified_note_url_normalizes_to_explore_note_id(self):
+        a='https://www.xiaohongshu.com/user/profile/'+'5'*24+'/'+'3'*24+'?xsec_source=pc_user'
+        b='https://www.xiaohongshu.com/explore/'+'3'*24
+        self.assertEqual(m.note_id(a),'3'*24)
+        self.assertEqual(m.proof_args(a),m.proof_args(b))
+        self.assertNotEqual(m.proof_args(a),m.proof_args(b.replace('3'*24,'4'*24)))
+
+    def test_review_accepts_codex_and_gemini_only(self):
+        probe_path,review_path=self.complete_probe_fixture()
+        probe=m.check_pointer(m.pointer(probe_path))
+        review=json.loads(review_path.read_text())
+        for reader in ('codex','gemini'):
+            m.validate_review(dict(review,reader=reader),probe)
+        for bad in ('','other',None,'CODEX'):
+            with self.subTest(bad=bad),self.assertRaisesRegex(bridge.BridgeError,'REVIEW_REQUIRED'):
+                m.validate_review(dict(review,reader=bad),probe)
+
 if __name__=='__main__':unittest.main()
