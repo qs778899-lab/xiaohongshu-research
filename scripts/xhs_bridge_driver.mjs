@@ -1170,7 +1170,14 @@ export async function publicReplyDom(opts) {
     const bar = composer.closest?.('.engage-bar');
     if (bar) {
       const inactiveCover = bar.querySelector?.('.not-active, .inner-when-not-active');
-      if (inactiveCover && visible(inactiveCover)) return false;
+      const coverLeaving = /\b(?:fade-leave-active|fade-leave-from|fade-leave-to|v-leave-active|leave-active)\b/.test(
+        String(inactiveCover?.className || '')
+      );
+      // On macOS/Chromium occluded windows (document.hidden===true), CSS transitions pause at
+      // frame 0: Vue adds `fade-leave-from fade-leave-active` to `.not-active` and mounts the real
+      // `#content-textarea` + `button.submit`, while `.bottom` stays at height 0 until unoccluded.
+      if (document.hidden === true && coverLeaving) return true;
+      if (inactiveCover && !coverLeaving && visible(inactiveCover)) return false;
       const bottom = bar.querySelector?.('.bottom');
       if (bottom && typeof bottom.getBoundingClientRect === 'function') {
         const rect = bottom.getBoundingClientRect();
@@ -1248,7 +1255,9 @@ export async function publicReplyDom(opts) {
     const box = composer?.closest?.('.engage-bar-container, .engage-bar, .comment-comp, .bottom-area') || scope;
     for (const sel of ['.reply-content .reply', '.reply-content', '.reply-info', '.reply-target', '.reply-user', '.reply-to', '.active-reply', '.reply-banner', '.comment-reply-header']) {
       for (const el of box.querySelectorAll(sel)) {
-        if (visible(el)) parts.push(String(el.innerText || el.textContent || '').trim());
+        const occludedMounted = document.hidden === true && el.getClientRects?.().length &&
+          (typeof getComputedStyle !== 'function' || getComputedStyle(el)?.display !== 'none');
+        if (visible(el) || occludedMounted) parts.push(String(el.innerText || el.textContent || '').trim());
       }
     }
     return [...new Set(parts.filter(Boolean))].join(' | ').slice(0, 300);

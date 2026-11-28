@@ -323,4 +323,53 @@ let checks = 0;
   checks++;
 }
 
+// 7. Occluded window (document.hidden=true): Vue pauses CSS transition with fade-leave-active
+//    on .not-active and .bottom height=0, yet composer & submit are live and submit cleanly once.
+{
+  let innerClicks = 0, submitClicks = 0;
+  const noteAuthor = makeNode('a', {attrs: {href: `/user/profile/${OTHER_UID}`}, text: 'Author'});
+  const composer = makeNode('p', {attrs: {id: 'content-textarea', contenteditable: 'true'}, visible: true});
+  const submitBtn = makeNode('button', {
+    cls: 'btn submit gray', text: '发送', visible: true,
+    onClick: () => { submitClicks++; composer.textContent = ''; },
+  });
+  composer.dispatchEvent = () => {
+    submitBtn.className = composer.textContent ? 'btn submit' : 'btn submit gray';
+    return true;
+  };
+  const inactiveCover = makeNode('div', {cls: 'not-active inner-when-not-active', visible: true});
+  const inner = makeNode('div', {
+    cls: 'inner', text: '说点什么...', visible: true,
+    onClick: () => {
+      innerClicks++;
+      // Chromium pauses CSS transition at frame 0 while occluded: opacity stays 1, bottom h stays 0,
+      // but Vue adds fade-leave-from fade-leave-active proving composer activation succeeded.
+      inactiveCover.className = 'not-active inner-when-not-active fade-leave-from fade-leave-active';
+    },
+  });
+  inactiveCover.append(inner);
+  const bottom = makeNode('div', {cls: 'bottom', children: [submitBtn], visible: true});
+  bottom.getBoundingClientRect = () => ({width: 367, height: 0});
+  const inputBox = makeNode('div', {cls: 'input-box', children: [makeNode('div', {cls: 'content-edit', children: [composer, inactiveCover]})]});
+  const engageBar = makeNode('div', {cls: 'interactions engage-bar', children: [inputBox, bottom]});
+  const doc = makeNode('body', {children: [makeNode('div', {cls: 'note-container', children: [
+    makeNode('div', {cls: 'author', children: [noteAuthor]}),
+    makeNode('div', {cls: 'engage-bar-container', children: [engageBar]}),
+  ]})]});
+  doc.hidden = true;
+
+  const res = await runDom(doc, {
+    action: 'public_reply_submit', expectedPath: `/explore/${NOTE_ID}`, uid: OWN_UID,
+    destination: 'top_level_comment', recipientUid: OTHER_UID,
+    message: 'Occluded synthetic inquiry?', execute: true, intentDigest: DIGEST,
+    postClickPollRounds: 1, postClickPollMs: 0,
+  }, {uid: OWN_UID, url: URL_STR, visible: false});
+  assert.equal(innerClicks, 1);
+  assert.equal(submitClicks, 1);
+  assert.equal(res.sendClicked, true);
+  assert.equal(res.clicksSubmitted, 1);
+  assert.equal(res.composerCleared, true);
+  checks++;
+}
+
 console.log(`PASS: guarded public reply DOM checks: ${checks}`);
