@@ -954,6 +954,7 @@ def commit_review_batch(project: Path, results_path: Path, *, auto_enqueue: bool
                             m = by_pos[pos]
                             val = gc.validate_media_image_result(img_res, m['note_id'], pos, m['sha256'])
                             summaries.append(f'pos {pos}: {val["observation"][:120]}')
+                            aliases.extend(val.get('discovered_aliases') or [])
                             if val['readable'] and not val['blank_or_unloaded']:
                                 media_keys.append(m['media_key'])
                                 positions.append(m['media_key'])

@@ -21,9 +21,16 @@ python3 scripts/xhs_bridge.py --project "/项目绝对路径" text-mode --bindin
 
 该模式通过绑定和具体文字调用共同生效。直接使用独立深读入口`deep.main`仍保留旧行为，不能认为所有深读调用都已切换后台。
 
-## 视觉核查继续使用原前台保护
+## 视觉核查与后台轮播原图资产采集
 
-截图、正文轮播图片、评论图片附件、视频画面及其他视觉核查仍按原来的目标可见性、布局与前台 guard 执行。即使视觉处理器借用`body`任务，也不会因此取得后台文字权限。启用文字后台不代表图片已读，不提高媒体完成数，也不改变现有图片／视频处理流程。
+CDP 视口截图、评论图片附件、视频画面及其他前台截图核查仍严格按原来的目标可见性、布局与前台 guard 执行（`test_background_visual_contract.mjs` 保持不变，绝不放宽 `screenshot` 可见性或伪造焦点）。
+
+针对正文轮播图片（`stage=images`），当绑定已显式开启 `background_text_collection=true`（且未将 `background_media_collection` 设为 `false`）时，`xhs_bridge_media.py` 提供独立的**后台观察原图资产路径（`observed-background-dom-asset-v1`）**：
+
+- 沿用 `prepare_target(..., text_only=True)` 与同一账号 `lease`，在不请求窗口焦点（`windowFocusRequested=false`）、不调用 `activate`/`screenshot` 的前提下，逐张核对 `media_state`/`media_select` 实测 DOM 中已解码的 `*.xhscdn.com` / `*.xiaohongshu.com` 公开内容图（自动过滤 `picasso-static` 界面图标与占位图）；
+- 通过无 Cookie、域名白名单、防跨域重定向、大小上限（25MB）、真实图片魔数（PNG/JPEG/WebP/GIF）校验保存原分辨率图片与 SHA-256 伴随元数据；遇 `text/html` 或 HTTP `401/403/429/461/471` 立即失败关闭并触发 `ACCESS_STOP`；
+- 采集结果只记 `reviewed=false`、`visual_verification_required=true`，仍须通过 `export-review-batch --include-media` 实际视觉读图并由 `commit-review-batch` 提交逐张观察回执；视频位点仍保留 `video_requires_segments=true`，不以缩略图冒充视频审读；
+- 此前因 `MEDIA_ACTIVATION_UNCONFIRMED` 挂起的旧 `images` 任务，可通过 `xhs_bridge_media.py --verify-background-fix --basis "..."` 按每个脚本代码版本一次的受限探针核验并归档旧故障。
 
 ## 只读诊断原研究窗口
 

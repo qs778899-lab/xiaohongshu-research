@@ -64,6 +64,7 @@ scripts/test_batch_bridge_resume.py
 scripts/test_body_status_validity.py
 scripts/test_bridge.py
 scripts/test_bridge_attach_source.py
+scripts/test_bridge_background_media.py
 scripts/test_bridge_binding_fork.py
 scripts/test_bridge_capture_diagnostics.py
 scripts/test_bridge_carousel.mjs

@@ -35,7 +35,7 @@ description: 深入检索小红书笔记、评论、楼中楼和相关媒体，�
 
 - 已获授权的公开问询需要通过已绑定标签页执行或发送后状态不明时，执行遵循[标签页级受守卫的公开问询执行](references/public-reply-execution.md)（独立显式 opt-in 脚本 `xhs_public_reply.py`，先预检、先记账、跨账号 UID 去重、单次不可重放、遇验证码立即写 `STOP`），复核遵循[发布结果只读复核](references/public-reply-verification.md)在验证恢复后优先重开原帖、读完整楼；区分当前可见、完整复核未见及尚未核完，不能只留“未知”就继续扩词。不自动补发、不私信、不互关。
 
-- 持续文字检索优先在原授权绑定启用 `text-mode --binding B --mode background`；后台正文、搜索和评论沿用目标与账号校验，图片及视觉核查继续原前台流程。模式切换、只读窗口诊断和实测边界见[后台文字采集](references/background-text-collection.md)。
+- 持续文字与轮播图片检索优先在原授权绑定启用 `text-mode --binding B --mode background`；后台正文、搜索、评论、作者主页及 `xhs_bridge_media.py` 的后台轮播原图资产采集（`observed-background-dom-asset-v1`，只读实测 DOM 中已解码的 `*.xhscdn.com` 公开原图，不抢窗口焦点、不放宽 CDP 截图可见性守卫、不伪标已读）均沿用目标、账号与 `ACCESS_STOP` 校验；前台截图、评论附件与视频画面继续原保护流程。模式切换、只读窗口诊断和实测边界见[后台文字采集](references/background-text-collection.md)。
 
 - 已发现很多候选、需要减少重复审读并可靠收尾时，使用[离线研究工作台与报告核验](references/research-desk.md)：显式课题范围、来源绑定的候选筛选、任务建议、媒体清单与分阶段指标。保留原采集及审读入口，工作台不修改采集状态或代替完成验证；报告使用各媒体位置自己的观察，禁止病例文案兜底。
 

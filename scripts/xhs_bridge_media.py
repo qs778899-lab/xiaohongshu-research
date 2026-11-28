@@ -9,12 +9,282 @@ import time
 import uuid
 from datetime import datetime, timezone
 from pathlib import Path
-from urllib.parse import urlparse,parse_qsl
+from urllib.error import HTTPError, URLError
+from urllib.parse import urlparse, parse_qsl
+from urllib.request import Request, build_opener
 
 import xhs_bridge as bridge
+import xhs_media as public_media
 import xhs_project as project_module
 
 CAPTURE_REVISION = 'rendered-carousel-v4-activation-prime-stable-identity'
+BACKGROUND_ASSET_CAPTURE_REVISION = 'observed-background-dom-asset-v1'
+BACKGROUND_BATCH_LIMIT = 6
+
+
+def background_media_allowed(binding):
+    """Opt-in background observed-DOM image capture; never relaxes screenshot visibility."""
+    return (isinstance(binding, dict)
+            and binding.get('background_text_collection') is True
+            and binding.get('background_media_collection') is not False)
+
+
+def prepare_background_media_target(project, binding, driver, task):
+    """Navigate bound detail tab in background mode using existing text_only guards."""
+    if not background_media_allowed(binding):
+        raise bridge.BridgeError('MEDIA_ACTIVATION_UNCONFIRMED')
+    nav_task = {**task, 'payload': {**task['payload'], 'stage': 'body'}}
+    return bridge.prepare_target(project, binding, driver, nav_task, text_only=True)
+
+
+def _sniff_image_extension(raw_bytes, content_type=''):
+    if not isinstance(raw_bytes, (bytes, bytearray)) or len(raw_bytes) < 12:
+        raise bridge.BridgeError('MEDIA_EMPTY_OR_UNLOADED')
+    head = bytes(raw_bytes[:16])
+    if head.startswith(b'\x89PNG\r\n\x1a\n'):
+        return '.png', 'image/png'
+    if head.startswith(b'\xff\xd8\xff'):
+        return '.jpg', 'image/jpeg'
+    if head[:4] == b'RIFF' and head[8:12] == b'WEBP':
+        return '.webp', 'image/webp'
+    if head[:6] in (b'GIF87a', b'GIF89a'):
+        return '.gif', 'image/gif'
+    if 'text/html' in (content_type or '').lower() or head.lstrip().startswith((b'<html', b'<!DOC', b'<!doc', b'<HTML')):
+        raise bridge.BridgeError('ACCESS_STOP')
+    raise bridge.BridgeError('MEDIA_IDENTITY_UNCONFIRMED')
+
+
+def _select_observed_slide_image(state):
+    """Select one decoded, visible, allowlisted content image URL from active slide DOM."""
+    evidence = state.get('mediaEvidence', {})
+    candidates = []
+    for item in evidence.get('images', []):
+        if item.get('loaded') is not True:
+            continue
+        src = item.get('src') or ''
+        w = int(item.get('naturalWidth') or 0)
+        h = int(item.get('naturalHeight') or 0)
+        if not (src and item.get('visible') is True and item.get('complete') is True and w > 2 and h > 2):
+            continue
+        if not public_media.allowed_url(src):
+            continue
+        host = (urlparse(src).hostname or '').lower()
+        is_ui_icon = host.startswith('picasso-static.') or '/fe-platform/' in urlparse(src).path
+        candidates.append((is_ui_icon, -(w * h), src, w, h))
+    if not candidates:
+        raise bridge.BridgeError('MEDIA_IDENTITY_UNCONFIRMED')
+    candidates.sort()
+    _, _, src, w, h = candidates[0]
+    return src, w, h
+
+
+def _download_observed_cdn_image(url, out_dir, position, *, opener=None):
+    """Credential-free, allowlisted public CDN download of a live DOM-observed image URL."""
+    if not public_media.allowed_url(url):
+        raise bridge.BridgeError('MEDIA_IDENTITY_UNCONFIRMED')
+    open_url = opener or build_opener(public_media.ObservedRedirects()).open
+    out_dir = Path(out_dir)
+    out_dir.mkdir(parents=True, exist_ok=True)
+    stamp = datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S%fZ')
+    partial = out_dir / f'{position:03d}-{stamp}.{uuid.uuid4().hex}.part'
+    maximum = public_media.LIMITS['image']
+    try:
+        req = Request(
+            url,
+            headers={'User-Agent': 'Mozilla/5.0', 'Accept': 'image/webp,image/png,image/jpeg,*/*'},
+            method='GET',
+        )
+        with open_url(req, timeout=30) as response:
+            final = response.geturl() if hasattr(response, 'geturl') else url
+            if not public_media.allowed_url(final):
+                raise bridge.BridgeError('MEDIA_IDENTITY_UNCONFIRMED')
+            content_type = (response.headers.get('Content-Type', '') if hasattr(response, 'headers') else '').lower()
+            if 'text/html' in content_type:
+                raise bridge.BridgeError('ACCESS_STOP')
+            length_hdr = response.headers.get('Content-Length') if hasattr(response, 'headers') else None
+            if length_hdr and str(length_hdr).isdigit() and int(length_hdr) > maximum:
+                raise bridge.BridgeError('MEDIA_IDENTITY_UNCONFIRMED')
+            chunks = []
+            total = 0
+            while True:
+                chunk = response.read(min(1024 * 1024, maximum - total + 1))
+                if not chunk:
+                    break
+                total += len(chunk)
+                if total > maximum:
+                    raise bridge.BridgeError('MEDIA_IDENTITY_UNCONFIRMED')
+                chunks.append(chunk)
+            raw = b''.join(chunks)
+        ext, detected_mime = _sniff_image_extension(raw, content_type)
+        out = out_dir / f'{position:03d}-{stamp}{ext}'
+        with open(partial, 'wb') as stream:
+            os.chmod(partial, 0o600)
+            stream.write(raw)
+        os.replace(partial, out)
+        sha = hashlib.sha256(raw).hexdigest()
+        return out, sha, len(raw), content_type or detected_mime
+    except HTTPError as exc:
+        if exc.code in {401, 403, 429, 461, 471}:
+            raise bridge.BridgeError('ACCESS_STOP') from None
+        raise bridge.BridgeError('MEDIA_EMPTY_OR_UNLOADED') from None
+    except (URLError, OSError, ValueError, public_media.MediaError):
+        raise bridge.BridgeError('MEDIA_EMPTY_OR_UNLOADED') from None
+    finally:
+        partial.unlink(missing_ok=True)
+
+
+def confirmed_background_asset_context(context, note, target):
+    if not isinstance(context, dict):
+        return False
+    return bool(
+        context.get('capture_revision') == BACKGROUND_ASSET_CAPTURE_REVISION
+        and context.get('acquisition_mode') == 'background_observed_dom_asset'
+        and context.get('windowFocusRequested') is False
+        and context.get('page')
+        and context.get('target_note_id') == note
+        and target.get('account_uid') and target.get('context_id')
+        and context.get('account_uid') == target.get('account_uid')
+        and context.get('context_id') == target.get('context_id')
+        and context.get('verified_at')
+        and bridge.target_path(urlparse(context.get('verified_url', '')).path) == '/explore/' + note
+    )
+
+
+def capture_background_assets(project, binding, task_id, positions, driver=None, *, opener=None):
+    """Acquire full-resolution observed CDN images from carousel slides in a background tab.
+
+    Never steals OS window focus, never relaxes screenshot visibility, and never marks
+    images visually reviewed.
+    """
+    project = Path(project).resolve()
+    db = project_module.Project(project)
+    try:
+        task = db.task(task_id)
+        if task['payload']['stage'] not in {'body', 'images', 'video'}:
+            raise bridge.BridgeError('MEDIA_TASK_REQUIRED')
+        bridge.observed_url(project, task)
+        note = task['payload']['target']
+    finally:
+        db.db.close()
+    expected = '/explore/' + note
+    b = bridge.load_binding(project, binding)
+    if not background_media_allowed(b):
+        raise bridge.BridgeError('MEDIA_ACTIVATION_UNCONFIRMED')
+    driver = driver or bridge.Driver(b['runtime'])
+    records = []
+    with bridge.lease(project, b) as keys:
+        try:
+            db = project_module.Project(project)
+            try:
+                prepare_background_media_target(db, b, driver, task)
+            finally:
+                db.close()
+            bridge.save_binding(project, binding, b)
+            state = driver.call('media_state', b, 'detail', expectedPath=expected)
+            if not positions:
+                return dict(
+                    state,
+                    note=note,
+                    position=state['index'] + 1,
+                    acquisition_mode='background_observed_dom_asset',
+                    verified_target={
+                        'note_id': note,
+                        'account_uid': b['account_uid'],
+                        'context_id': b['context_id'],
+                        'page': b['tabs']['detail']['page'],
+                    },
+                )
+            if any(i < 1 or i > state['count'] for i in positions):
+                raise bridge.BridgeError('MEDIA_INDEX_INVALID')
+            out_dir = project / 'bridge' / 'media' / note
+            for position in positions:
+                meta = bridge.verify_tab(driver, b, 'detail')
+                if meta.get('page') != b['tabs']['detail']['page'] or bridge.target_path(urlparse(meta.get('url', '')).path) != expected:
+                    raise bridge.BridgeError('TARGET_MISMATCH')
+                state = driver.call('media_state', b, 'detail', expectedPath=expected)
+                if state['index'] != position - 1:
+                    driver.call(
+                        'media_select', b, 'detail',
+                        expectedPath=expected,
+                        index=position - 1,
+                        expectedIndex=state['index'],
+                        expectedCount=state['count'],
+                    )
+                    after = None
+                    for _ in range(4):
+                        time.sleep(0.5)
+                        cand = driver.call('media_state', b, 'detail', expectedPath=expected)
+                        if cand.get('index') == position - 1 and cand.get('count') == state['count']:
+                            after = cand
+                            if cand.get('kind') in {'image', 'video'} and cand.get('screenshotReady') is True:
+                                break
+                    if after is None or after.get('index') != position - 1 or after.get('count') != state['count']:
+                        raise bridge.BridgeError('MEDIA_SELECTION_UNCONFIRMED')
+                else:
+                    after = state
+                if after.get('kind') == 'empty_or_unloaded' or after.get('mediaStatus') == 'empty_or_unloaded':
+                    raise bridge.BridgeError('MEDIA_EMPTY_OR_UNLOADED')
+                identity = assert_media_stable(project, note, position, after, after, 'background-asset')
+                verified = bridge.verify_tab(driver, b, 'detail')
+                if verified.get('page') != b['tabs']['detail']['page'] or bridge.target_path(urlparse(verified.get('url', '')).path) != expected:
+                    raise bridge.BridgeError('TARGET_MISMATCH')
+                obs_ctx = {
+                    'capture_revision': BACKGROUND_ASSET_CAPTURE_REVISION,
+                    'acquisition_mode': 'background_observed_dom_asset',
+                    'windowFocusRequested': False,
+                    'page': verified['page'],
+                    'account_uid': b['account_uid'],
+                    'context_id': b['context_id'],
+                    'target_note_id': note,
+                    'verified_url': verified['url'],
+                    'verified_at': bridge.legacy.now(),
+                    'visual_verification_required': True,
+                }
+                if after.get('kind') == 'video':
+                    record = {
+                        'position': position,
+                        'count': after['count'],
+                        'kind': 'video',
+                        'file': '',
+                        'url': verified['url'],
+                        'observed_at': bridge.legacy.now(),
+                        'reviewed': False,
+                        'capture_revision': BACKGROUND_ASSET_CAPTURE_REVISION,
+                        'acquisition_mode': 'background_observed_dom_asset',
+                        'observed_context': obs_ctx,
+                        'stable_media_identity': identity,
+                        'visual_verification_required': True,
+                    }
+                    records.append(record)
+                    continue
+                asset_url, nat_w, nat_h = _select_observed_slide_image(after)
+                out, sha, byte_len, mime = _download_observed_cdn_image(asset_url, out_dir, position, opener=opener)
+                record = {
+                    'position': position,
+                    'count': after['count'],
+                    'kind': 'image',
+                    'file': str(out),
+                    'sha256': sha,
+                    'bytes': byte_len,
+                    'content_type': mime,
+                    'natural_width': nat_w,
+                    'natural_height': nat_h,
+                    'source_asset_url': asset_url,
+                    'url': verified['url'],
+                    'observed_at': bridge.legacy.now(),
+                    'reviewed': False,
+                    'capture_revision': BACKGROUND_ASSET_CAPTURE_REVISION,
+                    'acquisition_mode': 'background_observed_dom_asset',
+                    'observed_context': obs_ctx,
+                    'stable_media_identity': identity,
+                    'visual_verification_required': True,
+                }
+                out.with_suffix('.json').write_text(json.dumps(record, ensure_ascii=False, indent=2))
+                records.append(record)
+            return {'captures': records, 'analysis_required': True, 'acquisition_mode': 'background_observed_dom_asset'}
+        except Exception as exc:
+            bridge.save_failure(project, binding, b, exc, keys)
+            raise
 
 
 def prepare_media_target(project, binding, driver, task):
@@ -352,11 +622,18 @@ def capture(project, binding, task_id, positions, driver=None, *, continue_local
 
 
 def collect_inventory(db, binding, task, driver):
-    """Discover actual carousel positions and hand visual review to Codex in small batches."""
+    """Discover actual carousel positions and hand visual review to Codex/Gemini in small batches."""
     import xhs_rounds as rounds
     rounds.schema(db)
     note=task['payload']['target']
-    state=capture(db.path,binding,task['id'],[],driver)
+    try:
+        use_background_assets=background_media_allowed(bridge.load_binding(db.path,binding))
+    except (bridge.BridgeError,OSError,ValueError):
+        use_background_assets=False
+    if use_background_assets:
+        state=capture_background_assets(db.path,binding,task['id'],[],driver)
+    else:
+        state=capture(db.path,binding,task['id'],[],driver)
     if state.get('kind')=='empty_or_unloaded' or state.get('mediaStatus')=='empty_or_unloaded':
         raise bridge.BridgeError('MEDIA_EMPTY_OR_UNLOADED')
     existing={r[0]:json.loads(r[1]) for r in db.db.execute('SELECT media_key,body FROM media_inventory WHERE note_id=?',(note,))}
@@ -368,7 +645,11 @@ def collect_inventory(db, binding, task, driver):
         if not valid:return False
         # Actual prior visual review remains valid regardless of capture revision.
         if states.get(key)=='reviewed':return True
-        proof=record.get('activation',{});target=state.get('verified_target',{})
+        target=state.get('verified_target',{})
+        if record.get('capture_revision')==BACKGROUND_ASSET_CAPTURE_REVISION:
+            return bool(record.get('stable_media_identity')
+                        and confirmed_background_asset_context(record.get('observed_context'),note,target))
+        proof=record.get('activation',{})
         preparation=record.get('paint_preparation',{})
         return (record.get('capture_revision')==CAPTURE_REVISION and proof.get('capture_revision')==CAPTURE_REVISION
                 and preparation.get('discarded_warmup') is True and preparation.get('wait_seconds')==1
@@ -381,8 +662,13 @@ def collect_inventory(db, binding, task, driver):
     missing=[i for i in range(1,state['count']+1) if not usable(f'body:{i}',existing.get(f'body:{i}',{}))]
     records=[]
     if missing:
-        records=capture(db.path,binding,task['id'],missing[:3],driver)['captures']
+        if use_background_assets:
+            records=capture_background_assets(db.path,binding,task['id'],missing[:BACKGROUND_BATCH_LIMIT],driver)['captures']
+        else:
+            records=capture(db.path,binding,task['id'],missing[:3],driver)['captures']
         for r in records:
+            if not r.get('file') or not Path(r['file']).is_file():
+                continue
             previous=existing.get(f"body:{r['position']}")
             if previous:
                 r['previous_capture']={k:previous.get(k) for k in ('file','sha256','capture_revision')}
@@ -401,9 +687,73 @@ def collect_inventory(db, binding, task, driver):
     snap={'url':records[0]['url'] if records else bridge.observed_url(db.path,task),
           'media_captures':records,'carousel_count':state['count'],'captured_positions':[r['position'] for r in records],
           'video_requires_segments':video,'body_carousel_only':True,'comment_media_scan_complete':False}
+    if use_background_assets:
+        snap['acquisition_mode']='background_observed_dom_asset'
     result=bridge.store_capture(db,task,snap)
-    return dict(result,media_files=[r['file'] for r in records],video_requires_segments=video,
+    return dict(result,media_files=[r['file'] for r in records if r.get('file')],video_requires_segments=video,
                 next='Codex visually reads images; video needs existing caption/transcript workflow' if video else 'Codex reads media and submits exact position receipts')
+
+
+BACKGROUND_MEDIA_VISIBILITY_FAULTS = {
+    'MEDIA_ACTIVATION_UNCONFIRMED',
+    'TARGET_NOT_VISIBLE',
+    'TARGET_VISIBILITY_UNCONFIRMED',
+    'SCREENSHOT_TARGET_NOT_VISIBLE',
+}
+
+
+def verify_background_fix(project, binding, task_id, basis, driver=None):
+    """One bounded probe per xhs_bridge_media.py version for a visibility-held images task."""
+    if not isinstance(basis, str) or not basis.strip():
+        raise bridge.BridgeError('REPAIR_BASIS_REQUIRED')
+    project = Path(project).resolve()
+    b = bridge.load_binding(project, binding)
+    if not background_media_allowed(b):
+        raise bridge.BridgeError('MEDIA_ACTIVATION_UNCONFIRMED')
+    db = project_module.Project(project)
+    try:
+        task = db.task(task_id)
+        p = task['payload']
+        if p.get('stage') != 'images':
+            raise bridge.BridgeError('MEDIA_TASK_REQUIRED')
+        pr = p.setdefault('bridge', {})
+        fault = pr.get('fault') or {}
+        if fault.get('code') not in BACKGROUND_MEDIA_VISIBILITY_FAULTS:
+            raise bridge.BridgeError('LOCAL_VISIBILITY_FAULT_REQUIRED')
+        version = hashlib.sha256(Path(__file__).read_bytes()).hexdigest()
+        probes = pr.setdefault('media_repair_probes', {})
+        if version in probes:
+            raise bridge.BridgeError('REPAIR_PROBE_ALREADY_USED')
+        probes[version] = {'at': bridge.legacy.now(), 'basis': basis.strip(), 'prior_fault': fault}
+        db.db.execute('UPDATE tasks SET payload=?,updated=? WHERE id=?', (project_module.dumps(p), bridge.legacy.now(), task_id))
+        db.db.commit()
+        result = collect_inventory(db, binding, db.task(task_id), driver)
+        current = db.task(task_id)
+        cp = current['payload']
+        cpr = cp.setdefault('bridge', {})
+        acquired = bool(result.get('media_files'))
+        cpr.setdefault('media_repair_probes', {})[version].update(
+            verified=acquired,
+            media_files=list(result.get('media_files') or []),
+            snapshot=result.get('snapshot'),
+        )
+        if acquired:
+            prior_fault = cpr.pop('fault', None)
+            if prior_fault:
+                cpr.setdefault('resolved_faults', []).append({
+                    'fault': prior_fault,
+                    'resolved_at': bridge.legacy.now(),
+                    'resolved_by_version': version,
+                    'basis': basis.strip(),
+                })
+        db.db.execute(
+            'UPDATE tasks SET payload=?,reason=?,updated=? WHERE id=?',
+            (project_module.dumps(cp), '' if acquired else current.get('reason', ''), bridge.legacy.now(), task_id),
+        )
+        db.db.commit()
+        return dict(result, repair_verified=acquired, repair_version=version)
+    finally:
+        db.close()
 
 
 if __name__ == '__main__':
@@ -412,12 +762,22 @@ if __name__ == '__main__':
     parser.add_argument('--binding', required=True)
     parser.add_argument('--task', required=True)
     parser.add_argument('--positions', nargs='*', type=int, default=[])
+    parser.add_argument('--background-assets', action='store_true',
+                        help='Use non-focus-stealing background observed-DOM CDN image capture (requires background_text_collection=true on binding).')
+    parser.add_argument('--verify-background-fix', action='store_true',
+                        help='Run one bounded background observed-DOM capture probe for a visibility-held images task.')
+    parser.add_argument('--basis', default='', help='Audit basis for --verify-background-fix.')
     parser.add_argument('--continue-local-empty', action='store_true',
                         help='Keep a verified mixed LIVE/image warmup gap and continue only later explicitly requested positions; never marks media read.')
     args = parser.parse_args()
     try:
-        print(json.dumps(capture(args.project, args.binding, args.task, args.positions,
-                                 continue_local_empty=args.continue_local_empty), ensure_ascii=False))
+        if args.verify_background_fix:
+            print(json.dumps(verify_background_fix(args.project, args.binding, args.task, args.basis), ensure_ascii=False))
+        elif args.background_assets:
+            print(json.dumps(capture_background_assets(args.project, args.binding, args.task, args.positions), ensure_ascii=False))
+        else:
+            print(json.dumps(capture(args.project, args.binding, args.task, args.positions,
+                                     continue_local_empty=args.continue_local_empty), ensure_ascii=False))
     except bridge.BridgeError as exc:
         print(json.dumps({'error': exc.code, 'diagnostic_file': getattr(exc,'diagnostic_file',None)}))
         raise SystemExit(1)
