@@ -4,6 +4,7 @@ import fcntl
 import hashlib
 import os
 import re
+import time
 
 import xhs_research as legacy
 
@@ -15,13 +16,18 @@ def uid_key(uid):
 
 
 @contextmanager
-def lock_file(path):
+def lock_file(path, *, wait_seconds=0.0, poll_interval=0.02):
     fd = os.open(path, os.O_CREAT | os.O_RDWR | os.O_NOFOLLOW, 0o600)
     try:
-        try:
-            fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
-        except BlockingIOError:
-            raise legacy.CollectionBusy("Account identity or collection is busy") from None
+        deadline = time.monotonic() + max(0.0, float(wait_seconds))
+        while True:
+            try:
+                fcntl.flock(fd, fcntl.LOCK_EX | fcntl.LOCK_NB)
+                break
+            except BlockingIOError:
+                if wait_seconds <= 0 or time.monotonic() >= deadline:
+                    raise legacy.CollectionBusy("Account identity or collection is busy") from None
+                time.sleep(poll_interval)
         yield
     finally:
         os.close(fd)
@@ -39,7 +45,7 @@ def associate(uid, profile_key):
     if not re.fullmatch(r"[a-f0-9]{64}", profile_key):
         raise legacy.ResearchError("Expected existing profile guard key")
     root = legacy.account_root()
-    with lock_file(root / "identity-registry.lock"):
+    with lock_file(root / "identity-registry.lock", wait_seconds=5.0):
         data = registry()
         # Preserve old associations: a profile changing login must not clear STOP.
         group = data.setdefault(key, {"uid": uid, "profile_keys": []})
@@ -95,23 +101,28 @@ def check_stops(keys, web_stop_exceptions=None, web_note_recovery=None):
 
 @contextmanager
 def account_lease(profile_key, uid=None, web_stop_exceptions=None, web_note_recovery=None):
-    # Registry lock prevents adding an alias halfway through lock acquisition.
-    with lock_file(legacy.account_root() / "identity-registry.lock"):
-        keys = related_keys(profile_key, uid)
-        with ExitStack() as stack:
-            acquired = []
-            try:
+    # Hold the global registry lock ONLY while reading aliases and acquiring
+    # every per-account collection.lock, then release it before yielding so
+    # unrelated accounts can run concurrently without blocking one another.
+    with ExitStack() as stack:
+        acquired = []
+        try:
+            with lock_file(legacy.account_root() / "identity-registry.lock", wait_seconds=5.0):
+                keys = related_keys(profile_key, uid)
+                pid = os.getpid()
                 for key in keys:
                     lock = guard_directory(key) / "collection.lock"
-                    if str(lock) in legacy._ACCOUNT_LOCKS:
+                    if legacy._ACCOUNT_LOCKS.get(str(lock)) == pid:
                         continue
                     stack.enter_context(lock_file(lock))
-                    legacy._ACCOUNT_LOCKS[str(lock)] = True
+                    legacy._ACCOUNT_LOCKS[str(lock)] = pid
                     acquired.append(str(lock))
-                check_stops(keys,web_stop_exceptions,web_note_recovery)
-                yield keys
-            finally:
-                for lock in acquired:
+                check_stops(keys, web_stop_exceptions, web_note_recovery)
+            yield keys
+        finally:
+            pid = os.getpid()
+            for lock in acquired:
+                if legacy._ACCOUNT_LOCKS.get(lock) == pid:
                     legacy._ACCOUNT_LOCKS.pop(lock, None)
 
 

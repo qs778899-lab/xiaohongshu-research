@@ -4,11 +4,13 @@ unsettled page-1 fallback, detail tab auto-activation, multi-pass verify merge,
 and pipeline --stages filter.
 """
 import json
+import multiprocessing as mp
 from pathlib import Path
 import tempfile
 import unittest
 from unittest.mock import patch
 
+import xhs_account_identity as identity
 import xhs_bridge as bridge
 import xhs_gemini_pipeline as pipeline
 import xhs_native as native
@@ -265,6 +267,43 @@ class AutomationUpgradesTests(unittest.TestCase):
         )
         self.assertEqual(search_task['payload']['stage'], 'search')
         self.assertEqual(search_task['payload']['sort'], 'most_commented')
+
+    def test_unrelated_accounts_run_concurrently_while_same_account_serializes(self):
+        prof_a, prof_b = 'a' * 64, 'b' * 64
+        uid_a, uid_b = '1' * 24, '2' * 24
+        identity.associate(uid_a, prof_a)
+        identity.associate(uid_b, prof_b)
+
+        def worker(guard_dir, profile_key, uid, q):
+            with patch.object(legacy, 'account_root', lambda: Path(guard_dir)):
+                try:
+                    with identity.account_lease(profile_key, uid):
+                        q.put('acquired')
+                except legacy.CollectionBusy:
+                    q.put('busy')
+
+        ctx = mp.get_context('fork')
+        with identity.account_lease(prof_a, uid_a):
+            # Unrelated account B must acquire its lease immediately without blocking on A.
+            q_b = ctx.Queue()
+            proc_b = ctx.Process(target=worker, args=(str(self.guard), prof_b, uid_b, q_b))
+            proc_b.start()
+            proc_b.join(3)
+            self.assertFalse(proc_b.is_alive())
+            self.assertEqual(q_b.get(timeout=1), 'acquired')
+
+            # Same account A in another process must still be strictly serialized.
+            q_a = ctx.Queue()
+            proc_a = ctx.Process(target=worker, args=(str(self.guard), prof_a, uid_a, q_a))
+            proc_a.start()
+            proc_a.join(3)
+            self.assertFalse(proc_a.is_alive())
+            self.assertEqual(q_a.get(timeout=1), 'busy')
+
+            # Registry associate() for another account must also succeed while A holds its lease.
+            prof_c, uid_c = 'c' * 64, '9' * 24
+            identity.associate(uid_c, prof_c)
+            self.assertIn(identity.uid_key(uid_c), identity.related_keys(prof_c, uid_c))
 
 
 if __name__ == '__main__':
