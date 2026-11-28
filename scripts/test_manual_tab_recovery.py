@@ -832,4 +832,18 @@ class ManualTabTests(unittest.TestCase):
             with self.subTest(bad=bad),self.assertRaisesRegex(bridge.BridgeError,'REVIEW_REQUIRED'):
                 m.validate_review(dict(review,reader=bad),probe)
 
+    def test_inspect_active_reuses_identical_archived_observation_without_mutation(self):
+        # Simulate a prior pre-attempt failure that already archived the same active-tab metadata.
+        with self.mocks(),patch.object(m,'proof_args',side_effect=bridge.BridgeError('MANUAL_NOTE_OR_SEARCH_REQUIRED')):
+            with self.assertRaisesRegex(bridge.BridgeError,'MANUAL_NOTE_OR_SEARCH_REQUIRED'):
+                m.inspect_active(self.p,'old',self.user)
+        obs=list((self.p/'bridge/manual-active-observations').glob('*.json'))
+        self.assertEqual(len(obs),1);before_bytes=obs[0].read_bytes()
+        with self.mocks():result=m.inspect_active(self.p,'old',self.user)
+        self.assertFalse(result['collection_permitted'])
+        self.assertEqual(obs[0].read_bytes(),before_bytes)
+        # Subsequent call still fails closed on already-consumed attempt reservation.
+        with self.mocks(),self.assertRaisesRegex(bridge.BridgeError,'ALREADY_ATTEMPTED'):
+            m.inspect_active(self.p,'old',self.user)
+
 if __name__=='__main__':unittest.main()

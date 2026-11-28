@@ -337,7 +337,12 @@ def inspect_active(project,parent_name,user_file,parent_project=None):
     finally:driver.close()
     folder=project/'bridge/manual-active-observations';folder.mkdir(parents=True,exist_ok=True)
     path=folder/(xp.digest({'metadata':meta,'user':pointer(user_file),'stops':stops})+'.json')
-    evidence(path,{'metadata':meta,'observed_at':xp.legacy.now(),'scope':'active_xhs_url_metadata_only'})
+    if path.exists():
+        existing,_=nr.read_json(path)
+        nr.require(existing.get('metadata')==meta and existing.get('scope')=='active_xhs_url_metadata_only',
+                   'RECOVERY_IMMUTABLE_RECORD_CHANGED')
+    else:
+        evidence(path,{'metadata':meta,'observed_at':xp.legacy.now(),'scope':'active_xhs_url_metadata_only'})
     return inspect(project,parent_name,path,user_file,parent_project=source_project)
 
 def probe_search(inspection_file,task_id):
